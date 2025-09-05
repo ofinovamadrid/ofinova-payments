@@ -2,6 +2,7 @@
   "name": "ofinova-payments",
   "version": "1.0.0",
   "private": true,
+  "type": "module",
   "scripts": {
     "start": "node api/create-checkout-session.js"
   },
