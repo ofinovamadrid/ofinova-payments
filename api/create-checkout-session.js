@@ -30,7 +30,7 @@ export default async function handler(req, res) {
     if (!planId || !PRICE_TABLE[planId]) return res.status(400).json({ error: "Invalid planId" });
 
     const item = PRICE_TABLE[planId];
-    const baseUrl = process.env.APP_BASE_URL || "https://spectacular-millions-373411.framer.app";
+   const baseUrl = process.env.APP_BASE_URL || "https://spectacular-millions-373411.framer.app";
 
     const session = await stripe.checkout.sessions.create({
       mode: "payment",
@@ -47,8 +47,8 @@ export default async function handler(req, res) {
         },
       ],
       customer_email: email || undefined,
-      success_url: `${baseUrl}/gracias?session_id={CHECKOUT_SESSION_ID}`,
-      cancel_url: `${baseUrl}/pago?cancel=1`,
+success_url: `${baseUrl}/confirmacion?session_id={CHECKOUT_SESSION_ID}`,
+cancel_url: `${baseUrl}/pago?canceled=1`,
       metadata: { planId, ...(metadata || {}) },
     });
 
