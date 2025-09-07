@@ -3,10 +3,9 @@
   "version": "1.0.0",
   "private": true,
   "type": "module",
-  "scripts": {
-    "start": "node api/create-checkout-session.js"
-  },
+  "scripts": { "start": "node api/create-checkout-session.js" },
   "dependencies": {
-    "stripe": "^14.0.0"
+    "stripe": "^14.0.0",
+    "micro": "^9.4.1"
   }
 }
