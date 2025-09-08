@@ -47,6 +47,16 @@ export default async function handler(req, res) {
         console.log("↩️ charge.refunded", ch.id, ch.amount_refunded)
         break
       }
+        case "charge.refunded": {
+  const charge = event.data.object;
+  console.log("↩️ refunded", {
+    charge: charge.id,
+    amount_refunded: charge.amount_refunded,
+    event: event.id
+  });
+  // TODO: 환불 시 계약 비활성화/부분환불 처리
+  break;
+}
       default:
         console.log("ℹ️ Unhandled event:", event.type)
     }
