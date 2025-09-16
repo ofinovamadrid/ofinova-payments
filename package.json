@@ -2,21 +2,18 @@
   "name": "ofinova-payments",
   "version": "1.0.0",
   "private": true,
-  "type": "module",
   "scripts": {
     "start": "node api/create-checkout-session.js",
     "dev": "vercel dev"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.45.0",
-    "@sparticuz/chromium": "^126.0.0",
-    "dayjs": "^1.11.13",
-    "handlebars": "^4.7.8",
     "micro": "^9.4.1",
+    "stripe": "^14.0.0",
+    "handlebars": "^4.7.8",
+    "dayjs": "^1.11.13",
     "puppeteer-core": "^22.13.1",
-    "stripe": "^14.0.0"
+    "@sparticuz/chromium": "^126.0.0"
   },
-  "engines": {
-    "node": "18.x"
-  }
+  "engines": { "node": "18.x" }
 }
