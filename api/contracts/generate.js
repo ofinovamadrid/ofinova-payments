@@ -15,19 +15,22 @@ async function loadHandlebars() {
   }
 }
 
-// Vercel 리소스 힌트(선택)
-module.exports.config = {
+// ✅ config는 exports.config 로 내보내세요 (module.exports를 덮어쓰지 않게)
+exports.config = {
   runtime: 'nodejs18.x',
   memory: 1024,
   maxDuration: 60,
 };
 
+// 디버그 마커(배포 로그에서 새 파일 적용 확인용)
+console.log('USING_CJS_GENERATE_JS');
+
 module.exports = async (req, res) => {
   // 브라우저로 직접 열었을 때 500 방지
   if (req.method === 'GET') {
-    res.status(200).send(
-      'OK: POST JSON to this endpoint to receive a PDF. Example: { "lang":"es","customer_name":"..." }'
-    );
+    res
+      .status(200)
+      .send('OK: POST JSON to this endpoint to receive a PDF. Example: { "lang":"es","customer_name":"..." }');
     return;
   }
   if (req.method !== 'POST') {
@@ -39,12 +42,11 @@ module.exports = async (req, res) => {
   try {
     const Handlebars = await loadHandlebars();
 
-    // 템플릿 경로 계산 (CJS에서도 __dirname 보장)
-    const __dirname = path.join(process.cwd(), 'api', 'contracts');
-
+    // ✅ 템플릿 경로: 지금 파일과 같은 폴더
+    const __dirname_local = __dirname;
     const lang = (req.body.lang || 'es').toLowerCase();
     const tplFile = lang === 'ko' ? 'template-ko.hbs' : 'template-es.hbs';
-    const templatePath = path.join(__dirname, tplFile);
+    const templatePath = path.join(__dirname_local, tplFile);
 
     const source = await fs.readFile(templatePath, 'utf8');
     const template = Handlebars.compile(source);
