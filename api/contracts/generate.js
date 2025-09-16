@@ -4,29 +4,19 @@ const puppeteer = require('puppeteer-core');
 const fs = require('fs/promises');
 const path = require('path');
 const dayjs = require('dayjs');
+const Handlebars = require('handlebars');
 
-// CJS/ESM 어느 쪽이든 안전하게 handlebars 로드
-async function loadHandlebars() {
-  try {
-    return require('handlebars');
-  } catch (_) {
-    const mod = await import('handlebars');
-    return mod.default || mod;
-  }
-}
-
-// ✅ config는 exports.config 로 내보내세요 (module.exports를 덮어쓰지 않게)
+// 함수 리소스 힌트
 exports.config = {
   runtime: 'nodejs18.x',
   memory: 1024,
-  maxDuration: 60,
+  maxDuration: 60
 };
 
-// 디버그 마커(배포 로그에서 새 파일 적용 확인용)
+// 디버그 마커(로그에서 새 배포 확인)
 console.log('USING_CJS_GENERATE_JS');
 
 module.exports = async (req, res) => {
-  // 브라우저로 직접 열었을 때 500 방지
   if (req.method === 'GET') {
     res
       .status(200)
@@ -40,13 +30,10 @@ module.exports = async (req, res) => {
   }
 
   try {
-    const Handlebars = await loadHandlebars();
-
-    // ✅ 템플릿 경로: 지금 파일과 같은 폴더
-    const __dirname_local = __dirname;
-    const lang = (req.body.lang || 'es').toLowerCase();
+    // 템플릿은 현재 파일과 같은 폴더(api/contracts)에 있다고 가정
+    const lang = ((req.body.lang || 'es') + '').toLowerCase();
     const tplFile = lang === 'ko' ? 'template-ko.hbs' : 'template-es.hbs';
-    const templatePath = path.join(__dirname_local, tplFile);
+    const templatePath = path.join(__dirname, tplFile);
 
     const source = await fs.readFile(templatePath, 'utf8');
     const template = Handlebars.compile(source);
@@ -58,7 +45,7 @@ module.exports = async (req, res) => {
       args: chromium.args,
       defaultViewport: chromium.defaultViewport,
       executablePath: await chromium.executablePath(),
-      headless: true,
+      headless: true
     });
 
     const page = await browser.newPage();
