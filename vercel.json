@@ -3,8 +3,7 @@
     "api/contracts/generate.js": {
       "runtime": "nodejs18.x",
       "memory": 1024,
-      "maxDuration": 60,
-      "includeFiles": "api/contracts/*.hbs"
+      "maxDuration": 60
     }
   }
 }
