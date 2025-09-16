@@ -4,12 +4,6 @@
       "runtime": "nodejs18.x",
       "memory": 1024,
       "maxDuration": 60,
-      "nodeModules": [
-        "handlebars",
-        "dayjs",
-        "puppeteer-core",
-        "@sparticuz/chromium"
-      ],
       "includeFiles": "api/contracts/*.hbs"
     }
   }
