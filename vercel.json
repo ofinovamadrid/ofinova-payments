@@ -1,6 +1,6 @@
 {
   "functions": {
-    "api/contracts/generate.js": {
+    "api/contracts/*.js": {
       "runtime": "nodejs18.x",
       "memory": 1024,
       "maxDuration": 60
