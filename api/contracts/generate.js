@@ -1,20 +1,33 @@
-// api/contracts/generate.js  (CommonJS)
+// api/contracts/generate.js
 const chromium = require('@sparticuz/chromium');
 const puppeteer = require('puppeteer-core');
-const fs = require('fs').promises;
+const fs = require('fs/promises');
 const path = require('path');
-const Handlebars = require('handlebars');
 const dayjs = require('dayjs');
 
-/** Vercel 런타임 힌트 */
-module.exports.config = { runtime: 'nodejs18.x' };
+// CJS/ESM 어느 쪽이든 안전하게 handlebars 로드
+async function loadHandlebars() {
+  try {
+    return require('handlebars');
+  } catch (_) {
+    const mod = await import('handlebars');
+    return mod.default || mod;
+  }
+}
+
+// Vercel 리소스 힌트(선택)
+module.exports.config = {
+  runtime: 'nodejs18.x',
+  memory: 1024,
+  maxDuration: 60,
+};
 
 module.exports = async (req, res) => {
-  // 브라우저 GET 접근 시 500 방지
+  // 브라우저로 직접 열었을 때 500 방지
   if (req.method === 'GET') {
-    res
-      .status(200)
-      .send('OK: POST JSON to this endpoint to receive a PDF. Example fields: { lang, customer_name, ... }');
+    res.status(200).send(
+      'OK: POST JSON to this endpoint to receive a PDF. Example: { "lang":"es","customer_name":"..." }'
+    );
     return;
   }
   if (req.method !== 'POST') {
@@ -24,45 +37,38 @@ module.exports = async (req, res) => {
   }
 
   try {
-    const lang = ((req.body && req.body.lang) || 'es').toLowerCase();
+    const Handlebars = await loadHandlebars();
+
+    // 템플릿 경로 계산 (CJS에서도 __dirname 보장)
+    const __dirname = path.join(process.cwd(), 'api', 'contracts');
+
+    const lang = (req.body.lang || 'es').toLowerCase();
     const tplFile = lang === 'ko' ? 'template-ko.hbs' : 'template-es.hbs';
     const templatePath = path.join(__dirname, tplFile);
 
-    // 템플릿 읽기/컴파일
     const source = await fs.readFile(templatePath, 'utf8');
     const template = Handlebars.compile(source);
 
-    // 템플릿 데이터
-    const data = {
-      ...(req.body || {}),
-      today: dayjs().format('YYYY-MM-DD HH:mm')
-    };
+    const data = { ...req.body, today: dayjs().format('YYYY-MM-DD HH:mm') };
     const html = template(data);
 
-    // Puppeteer (Vercel 서버리스 친화 설정)
     const browser = await puppeteer.launch({
       args: chromium.args,
       defaultViewport: chromium.defaultViewport,
       executablePath: await chromium.executablePath(),
-      headless: true
+      headless: true,
     });
 
     const page = await browser.newPage();
     await page.setContent(html, { waitUntil: 'networkidle0' });
-
-    const pdfBuffer = await page.pdf({
-      format: 'A4',
-      printBackground: true
-    });
-
+    const pdfBuffer = await page.pdf({ format: 'A4', printBackground: true });
     await browser.close();
 
-    // PDF 응답
     res.setHeader('Content-Type', 'application/pdf');
     res.setHeader('Content-Disposition', `attachment; filename="contract-${Date.now()}.pdf"`);
     res.status(200).send(Buffer.from(pdfBuffer));
   } catch (err) {
     console.error('GEN_PDF_ERROR', err);
-    res.status(500).json({ error: 'GEN_PDF_ERROR', message: String(err && err.message || err) });
+    res.status(500).json({ error: 'GEN_PDF_ERROR', message: String(err?.message || err) });
   }
 };
