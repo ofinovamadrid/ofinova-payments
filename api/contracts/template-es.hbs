@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8" />
+  <title>Contrato Ofinova - {{contract_id}}</title>
+  <style>
+    body{font-family:Inter,system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;font-size:12px;line-height:1.55;margin:28px;color:#111}
+    h1{font-size:18px;margin:0 0 8px}
+    h2{font-size:15px;margin:14px 0 6px}
+    .muted{color:#6B7280}
+    .box{background:#F8FEFC;border:1px solid #CFF6EA;border-radius:10px;padding:12px 14px;margin:10px 0}
+    .sep{height:1px;background:#E5E7EB;margin:12px 0}
+    .kv{display:flex;gap:18px;flex-wrap:wrap}
+    .kv b{display:inline-block;min-width:120px}
+  </style>
+</head>
+<body>
+  <div class="box">
+    <h1>OFINOVA</h1>
+    <div class="kv">
+      <div><b>Cliente:</b> {{customer_name}}</div>
+      <div><b>Documento:</b> {{tax_id}}</div>
+      <div><b>Email:</b> {{customer_email}}</div>
+      <div><b>Tel.:</b> {{customer_phone}}</div>
+      <div><b>Tipo:</b> {{entity_type}} ({{use_type}})</div>
+      <div><b>Plan:</b> {{plan_months}} meses</div>
+      <div><b>Correo:</b> {{mail_plan}}</div>
+      <div><b>Precio base:</b> {{price_example}} €/mes <span class="muted">(IVA no incluido)</span></div>
+      <div><b>Dirección:</b> C/ Cadarso 16, Local, 28008 Madrid</div>
+      <div><b>Activación:</b> {{activation_datetime}}</div>
+    </div>
+  </div>
+
+  <div class="sep"></div>
+
+  <p class="muted">Contrato · Fecha: {{contract_date}} · Versión: ES v1.0 · ID: {{contract_id}}</p>
+
+  <h2>1. Objeto y alcance</h2>
+  <p>
+    Ofinova presta al Cliente un servicio de <b>domicilio comercial/correspondencia</b> en la dirección
+    <b>C/ Cadarso 16, Local, 28008 Madrid</b>, con <b>gestión básica de correspondencias</b> y opciones
+    de aviso, escaneo (opt-in) y reenvío según tarifas. El servicio no constituye asesoría legal/tributaria/laboral;
+    Ofinova podrá ofrecerla en el futuro mediante terceros o servicio propio.
+  </p>
+
+  <h2>2. Duración, renovación y cancelación</h2>
+  <p>
+    Plazo inicial: {{plan_months}} meses. Renovación automática por periodos iguales salvo aviso de baja
+    por email o WhatsApp con <b>30 días de antelación</b>. Planes prepago B2B: <b>no hay reembolsos</b>, salvo
+    error imputable a Ofinova.
+  </p>
+
+  <h2>3. KYC/AML</h2>
+  <p>
+    El Cliente aportará documentación KYC/AML; la falta de aporte o verificación permite la suspensión/terminación inmediata.
+    Ofinova podrá reportar operaciones sospechosas conforme a Ley 10/2010 y RD 304/2014.
+  </p>
+
+  <h2>4. Uso permitido/prohibido</h2>
+  <p>
+    Prohibido: actividades ilícitas, suplantación, spam, alta en mapas sin actividad real, almacenamiento masivo o peligroso,
+    fraudes, uso indebido de Seguridad Social, y toda conducta que razonablemente ponga en riesgo a Ofinova o terceros.
+  </p>
+
+  <h2>5. Responsabilidad</h2>
+  <p>
+    Ofinova no responde por daños indirectos; tope de responsabilidad: suma de cuotas de los <b>últimos 3 meses</b> (salvo dolo/culpa grave).
+  </p>
+
+  <h2>6. Datos personales</h2>
+  <p>
+    Datos tratados conforme RGPD/LOPDGDD. Conservación tras fin de contrato sólo durante el plazo legal de facturación/tributario y supresión posterior.
+  </p>
+
+  <h2>7. Notificaciones</h2>
+  <p>
+    Email prioritario y WhatsApp como apoyo. Canal oficial: <b>ofinovamadrid@gmail.com</b>.
+  </p>
+
+  <h2>8. Ley y fuero</h2>
+  <p>
+    Derecho español y <b>Juzgados de Madrid</b>. La versión española prevalece. Activación del domicilio: en el momento en que
+    Ofinova marque el servicio como <b>ACTIVO</b> o emita el <b>certificado de domicilio</b>, lo que ocurra primero.
+  </p>
+
+  <div class="sep"></div>
+  <p class="muted">© Ofinova — Este documento se genera automáticamente.</p>
+</body>
+</html>
