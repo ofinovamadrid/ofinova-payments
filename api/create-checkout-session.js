@@ -52,16 +52,23 @@ export default async function handler(req, res) {
     const baseUrl =
       process.env.APP_BASE_URL || "https://spectacular-millions-373411.framer.app";
 
-    // lead_id 추출(있을 때만 전달)
-    const leadId = metadata.lead_id || metadata.leadId || "";
+    // ✅ lead_id/orderId 정규화(하나로 통일)
+    const leadId = String(
+      metadata.lead_id ?? metadata.leadId ?? metadata.orderId ?? ""
+    ).trim();
+
+    // 런칭 안정성 위해 키 누락은 세션 생성 중단(데이터 고아 방지)
+    if (!leadId) {
+      return res.status(400).json({ error: "Missing lead_id/orderId in metadata" });
+    }
 
     const session = await stripe.checkout.sessions.create({
       mode: "payment",
 
-      // ✅ Stripe가 IVA를 자동으로 계산/추가
+      // ✅ Stripe가 IVA 자동 계산/추가
       automatic_tax: { enabled: true },
 
-      // ✅ 세금 계산을 위해 청구지 주소는 필수로 받기
+      // ✅ 세금 계산 위해 청구지 주소 필수
       billing_address_collection: "required",
 
       // 결제 항목(순액, 세금 별도)
@@ -84,18 +91,22 @@ export default async function handler(req, res) {
       success_url: `${baseUrl}/pago?status=success&session_id={CHECKOUT_SESSION_ID}`,
       cancel_url: `${baseUrl}/pago?status=failed&canceled=1`,
 
-      // 메타데이터(세션/PI 모두 저장)
-      metadata: stringifyMeta({ lead_id: leadId, planId, ...metadata }),
-      payment_intent_data: { metadata: stringifyMeta({ lead_id: leadId }) },
+      // ✅ 메타데이터(세션/PI 모두 저장)
+      //    - ...metadata 먼저 → 우리 표준 키(lead_id/orderId)로 최종 덮어쓰기
+      metadata: stringifyMeta({ ...metadata, lead_id: leadId, orderId: leadId, planId }),
+      payment_intent_data: {
+        metadata: stringifyMeta({ ...metadata, lead_id: leadId, orderId: leadId }),
+      },
 
-      // 대시보드 식별 편의용
-      client_reference_id: leadId || undefined,
+      // ✅ 성공 웹훅 매칭용(Checkout 전용): 클라-서버 공통 키
+      client_reference_id: leadId,
 
       // 선택: Checkout UI 로케일 자동
       locale: "auto",
     });
 
-    res.status(200).json({ url: session.url });
+    // 디버깅 편의를 위해 키/세션ID도 반환(원하면 제거 가능)
+    res.status(200).json({ url: session.url, lead_id: leadId, session_id: session.id });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: err.message || "Internal server error" });
