@@ -1,3 +1,4 @@
+// api/create-checkout-session.js
 import Stripe from "stripe";
 
 if (!process.env.STRIPE_SECRET_KEY) {
@@ -22,6 +23,7 @@ const PLAN_MONTHS = { p3: 3, p6: 6, p12: 12, p24: 24 };
 /** 우편 월요금 — 순액(IVA 제외), 센트 단위 */
 const MAIL_PRICE_TABLE = { lite: 390, pro: 990 };
 
+/** CORS 허용 출처 (프레이머 도메인) */
 const ALLOWED_ORIGIN =
   process.env.APP_BASE_URL || "https://spectacular-millions-373411.framer.app";
 
@@ -32,6 +34,7 @@ function applyCors(res) {
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
 }
 
+/** Stripe 메타데이터는 문자열만 허용 → 문자열화 */
 function stringifyMeta(obj = {}) {
   const out = {};
   for (const [k, v] of Object.entries(obj)) {
@@ -71,7 +74,7 @@ export default async function handler(req, res) {
     const baseUrl =
       process.env.APP_BASE_URL || "https://spectacular-millions-373411.framer.app";
 
-    // lead_id(orderId) 정규화
+    // lead_id(orderId) 정규화 (필수)
     const leadId = String(
       metadata.lead_id ?? metadata.leadId ?? metadata.orderId ?? ""
     ).trim();
@@ -80,7 +83,7 @@ export default async function handler(req, res) {
     }
 
     // ─────────────────────────────────────────
-    // 1) 메일 옵션 재계산(서버 기준) + 강한 폴백
+    // 1) 메일 옵션 재계산(서버 기준) + 폴백
     // ─────────────────────────────────────────
     const months =
       toInt(metadata.months, PLAN_MONTHS[planId] || 0) || PLAN_MONTHS[planId];
@@ -97,8 +100,9 @@ export default async function handler(req, res) {
       String(metadata.mailCharge ?? metadata.mail_charge ?? "").toLowerCase() ||
       "upfront-all"; // 기본값
 
-    // 클라 전달 월요금(폴백용) — 믿지는 않지만 인식 실패시만 사용
-    const clientMailMonthly = Math.max(0, Number(String(metadata.mailMonthly ?? "").replace(",", "."))) || 0;
+    // 클라 전달 월요금(폴백용) — 신뢰하지 않지만 인식 실패시만 사용
+    const clientMailMonthly =
+      Math.max(0, Number(String(metadata.mailMonthly ?? "").replace(",", "."))) || 0;
 
     // 본체(A)
     const line_items = [
@@ -136,7 +140,8 @@ export default async function handler(req, res) {
 
       if (unit && months > 0) {
         const qty = mailCharge === "monthly-only" ? 1 : months;
-        const titleSuffix = mailCharge === "monthly-only" ? " · 1ª mensualidad" : ` · ${months} meses`;
+        const titleSuffix =
+          mailCharge === "monthly-only" ? " · 1ª mensualidad" : ` · ${months} meses`;
         const name = `Gestión de correo — ${planLabel}${titleSuffix}`;
 
         line_items.push({
@@ -167,7 +172,7 @@ export default async function handler(req, res) {
       lead_id: leadId,
       orderId: leadId,
       planId,
-      // 디버그 플래그(Stripe 대시보드 세션/PI에서 바로 확인)
+      // 디버그 플래그(대시보드에서 즉시 판독)
       dbg_mail_applied,
       dbg_mail_qty,
       dbg_mail_unit,
@@ -176,19 +181,37 @@ export default async function handler(req, res) {
 
     const session = await stripe.checkout.sessions.create({
       mode: "payment",
+
+      // IVA 자동계산
       automatic_tax: { enabled: true },
+
+      // 주소를 받아야 IVA 적용됨
       billing_address_collection: "required",
+
+      // 본체 + (조건 충족 시) 우편 라인
       line_items,
+
+      // 고객 이메일(선택)
       customer_email: email || undefined,
+
+      // 복귀 URL
       success_url: `${baseUrl}/pago?status=success&session_id={CHECKOUT_SESSION_ID}`,
       cancel_url: `${baseUrl}/pago?status=failed&canceled=1`,
+
+      // 메타데이터(세션/PI 모두 저장)
       metadata: stringifyMeta(sessMeta),
       payment_intent_data: { metadata: stringifyMeta(sessMeta) },
+
+      // 클라-서버 공통 키
       client_reference_id: leadId,
+
+      // Checkout UI 언어
       locale: "auto",
     });
 
-    res.status(200).json({ url: session.url, lead_id: leadId, session_id: session.id });
+    res
+      .status(200)
+      .json({ url: session.url, lead_id: leadId, session_id: session.id });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: err.message || "Internal server error" });
