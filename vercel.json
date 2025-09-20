@@ -1,7 +1,7 @@
 {
   "functions": {
     "api/contracts/generate.js": {
-      "runtime": "nodejs22.x",
+      "runtime": "nodejs20.x",
       "memory": 1024,
       "maxDuration": 60,
       "includeFiles": "api/contracts/*.hbs"
