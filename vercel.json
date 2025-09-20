@@ -4,10 +4,7 @@
       "runtime": "nodejs22.x",
       "memory": 1024,
       "maxDuration": 60,
-      "includeFiles": [
-        "api/contracts/*.hbs",
-        "node_modules/handlebars/**"
-      ]
+      "includeFiles": "api/contracts/*.hbs"
     }
   }
 }
