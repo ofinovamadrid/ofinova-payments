@@ -1,4 +1,5 @@
 {
+  "version": 2,
   "functions": {
     "api/contracts/generate.js": {
       "runtime": "nodejs20.x",
