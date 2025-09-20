@@ -9,6 +9,9 @@ const stripe = new Stripe(process.env.STRIPE_SECRET_KEY, {
   apiVersion: "2024-06-20",
 });
 
+/** ✅ 수동 세율(IVA 21%) — Stripe 대시보드에서 만든 Tax rate ID */
+const TAX_RATE_ID = "txr_1S9RT93pToW48VXP6fB9vkUy";
+
 /** 본체 플랜 — 순액(IVA 제외) 금액, 센트 단위 */
 const PRICE_TABLE = {
   p3:  { name: "Ofinova Domiciliación – 3 meses",  unit_amount: 6900  }, // 69.00€
@@ -104,7 +107,7 @@ export default async function handler(req, res) {
     const clientMailMonthly =
       Math.max(0, Number(String(metadata.mailMonthly ?? "").replace(",", "."))) || 0;
 
-    // 본체(A)
+    // 본체(A) — 반드시 세율(IVA) 붙이기
     const line_items = [
       {
         price_data: {
@@ -114,10 +117,11 @@ export default async function handler(req, res) {
           tax_behavior: "exclusive",
         },
         quantity: 1,
+        tax_rates: [TAX_RATE_ID], // ✅ IVA 21%
       },
     ];
 
-    // 우편(B) — 조건부
+    // 우편(B) — 조건부 (있으면 세율도 동일 적용)
     let dbg_mail_applied = "0";
     let dbg_mail_qty = "0";
     let dbg_mail_unit = "0";
@@ -152,6 +156,7 @@ export default async function handler(req, res) {
             tax_behavior: "exclusive",
           },
           quantity: qty,
+          tax_rates: [TAX_RATE_ID], // ✅ IVA 21%
         });
 
         dbg_mail_applied = "1";
@@ -182,10 +187,10 @@ export default async function handler(req, res) {
     const session = await stripe.checkout.sessions.create({
       mode: "payment",
 
-      // IVA 자동계산
-      automatic_tax: { enabled: true },
+      /** ❗️수동 세율을 쓰므로 자동 세금은 끈다 */
+      automatic_tax: { enabled: false },
 
-      // 주소를 받아야 IVA 적용됨
+      // 주소는 계속 받되(선택), 수동세율에는 필수는 아님
       billing_address_collection: "required",
 
       // 본체 + (조건 충족 시) 우편 라인
