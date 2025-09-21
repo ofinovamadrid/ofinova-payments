@@ -1,4 +1,6 @@
 // api/create-checkout-session.js
+// 2025-03 | CORS multi-origin + safer defaults
+
 import Stripe from "stripe";
 
 if (!process.env.STRIPE_SECRET_KEY) {
@@ -9,18 +11,14 @@ const stripe = new Stripe(process.env.STRIPE_SECRET_KEY, {
   apiVersion: "2024-06-20",
 });
 
-/** IVA 21% 세율 — 대시보드 Tax rates의 ID.
- *  환경변수 STRIPE_TAX_RATE_ID 가 있으면 그걸 쓰고,
- *  없으면 현재 사용하던 고정값을 fallback으로 사용. */
+/** IVA 21% 세율 — 대시보드 Tax rates의 ID. */
 const TAX_RATE_ID =
   process.env.STRIPE_TAX_RATE_ID || "txr_1S9RT93pToW48VXP6fB9vkUy";
 
 /** 랜딩의 '계약기간' 키 → 개월수 */
 const PLAN_MONTHS = { p3: 3, p6: 6, p12: 12, p24: 24 };
 
-/** 주소지(도미실리오) 월 요금용 Stripe Price IDs (구독 전용)
- *  계약기간에 따라 월요금이 달라지므로,
- *  p3→23€/mo, p6→20€/mo, p12→17€/mo, p24→14€/mo 로 매핑한다. */
+/** 주소지(도미실리오) 월 요금용 Stripe Price IDs (구독 전용) */
 const PRICE_DOMI_BY_PLAN = {
   p3: process.env.STRIPE_PRICE_DOMI_23, // 23€/mo
   p6: process.env.STRIPE_PRICE_DOMI_20, // 20€/mo
@@ -34,7 +32,7 @@ const PRICE_MAIL = {
   pro: process.env.STRIPE_PRICE_MAIL_PRO_990,   // 9.90€/mo
 };
 
-/** 일시불 결제(한번에 전액)용 순액(IVA 제외) 금액 표 — 센트 단위 */
+/** 일시불 결제(전액 선결제)용 순액(IVA 제외) — 센트 */
 const UPFRONT_PRICE_TABLE = {
   p3:  { name: "Ofinova Domiciliación – 3 meses",  unit_amount: 6900  }, // 69.00€
   p6:  { name: "Ofinova Domiciliación – 6 meses",  unit_amount: 12000 }, // 120.00€
@@ -45,17 +43,54 @@ const UPFRONT_PRICE_TABLE = {
 /** 우편(일시불에서 월×개월 계산에 쓰는 순액, 센트) */
 const MAIL_NET_EUR_CENTS = { lite: 390, pro: 990 };
 
-/** CORS 허용 출처 (프레이머 도메인) */
-const ALLOWED_ORIGIN =
-  process.env.APP_BASE_URL || "https://spectacular-millions-373411.framer.app";
+/* ───────── CORS: 다중 오리진 지원 ───────── */
+const RAW_ALLOWED =
+  process.env.CORS_ALLOWED_ORIGINS ||
+  [
+    "https://ofinova-madrid.es",
+    "https://www.ofinova-madrid.es",
+    "https://*.framer.app",
+    "https://ofinova.vercel.app",
+    "http://localhost:3000",
+  ].join(",");
 
-function applyCors(res) {
-  res.setHeader("Access-Control-Allow-Origin", ALLOWED_ORIGIN);
+const ALLOWED = RAW_ALLOWED.split(",").map((s) => s.trim()).filter(Boolean);
+
+function matchWildcard(pattern, origin) {
+  if (!pattern.includes("*")) return pattern === origin;
+  // e.g. pattern: https://*.framer.app
+  try {
+    const u = new URL(origin);
+    const p = new URL(pattern.replace("*.", "")); // just to parse scheme/host
+    if (u.protocol !== p.protocol) return false;
+    const hostPattern = pattern.split("://")[1]; // *.framer.app
+    const re = new RegExp(
+      "^" + hostPattern.replace(/\./g, "\\.").replace(/\*/g, ".*") + "$"
+    );
+    return re.test(u.host);
+  } catch {
+    return false;
+  }
+}
+function isAllowedOrigin(origin) {
+  if (!origin) return false;
+  return ALLOWED.some((pat) => matchWildcard(pat, origin));
+}
+function applyCors(req, res) {
+  const origin = req.headers.origin || "";
+  if (isAllowedOrigin(origin)) {
+    res.setHeader("Access-Control-Allow-Origin", origin); // 에코
+  } else {
+    // 안전 기본값(운영 도메인) — 필요 시 제거/조정
+    res.setHeader("Access-Control-Allow-Origin", "https://ofinova-madrid.es");
+  }
   res.setHeader("Vary", "Origin");
   res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+  res.setHeader("Access-Control-Max-Age", "86400"); // 1 day
 }
 
+/* ───────── Utils ───────── */
 function stringifyMeta(obj = {}) {
   const out = {};
   for (const [k, v] of Object.entries(obj)) {
@@ -63,11 +98,12 @@ function stringifyMeta(obj = {}) {
   }
   return out;
 }
-const toInt = (v, d = 0) =>
-  Number.isFinite(parseInt(String(v ?? "").trim(), 10))
-    ? parseInt(String(v ?? "").trim(), 10)
-    : d;
-const toBool = (v) => ["1", "true", "yes", "on"].includes(String(v ?? "").toLowerCase());
+const toInt = (v, d = 0) => {
+  const n = parseInt(String(v ?? "").trim(), 10);
+  return Number.isFinite(n) ? n : d;
+};
+const toBool = (v) =>
+  ["1", "true", "yes", "on"].includes(String(v ?? "").toLowerCase());
 function normMailPlan(s) {
   const t = String(s ?? "").toLowerCase();
   if (t.includes("lite")) return "lite";
@@ -76,10 +112,12 @@ function normMailPlan(s) {
   return "";
 }
 
+/* ───────── Handler ───────── */
 export default async function handler(req, res) {
-  applyCors(res);
+  applyCors(req, res);
   if (req.method === "OPTIONS") return res.status(200).end();
-  if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
+  if (req.method !== "POST")
+    return res.status(405).json({ error: "Method not allowed" });
 
   try {
     /** 필수 입력 */
@@ -88,16 +126,20 @@ export default async function handler(req, res) {
       return res.status(400).json({ error: "Invalid planId" });
     }
 
-    /** 공통 값 */
+    /** 리다이렉트 기준 URL (프런트 도메인) */
     const baseUrl =
       process.env.APP_BASE_URL || "https://spectacular-millions-373411.framer.app";
-    const months = toInt(metadata.months, PLAN_MONTHS[planId]) || PLAN_MONTHS[planId];
+
+    const months =
+      toInt(metadata.months, PLAN_MONTHS[planId]) || PLAN_MONTHS[planId];
 
     const leadId = String(
       metadata.lead_id ?? metadata.leadId ?? metadata.orderId ?? ""
     ).trim();
     if (!leadId) {
-      return res.status(400).json({ error: "Missing lead_id/orderId in metadata" });
+      return res
+        .status(400)
+        .json({ error: "Missing lead_id/orderId in metadata" });
     }
 
     /** 우편 옵션 파싱 */
@@ -107,7 +149,7 @@ export default async function handler(req, res) {
       metadata.mail ?? metadata.mail_plan ?? metadata.mailPlan ?? ""
     );
 
-    /** 디버그 태그(대시보드에서 확인 편의) */
+    /** 디버그 태그(대시보드 확인 편의) */
     const sessMeta = {
       ...metadata,
       lead_id: leadId,
@@ -119,15 +161,12 @@ export default async function handler(req, res) {
       mode: (payMode || metadata.payMode || "payment").toLowerCase(), // "payment" | "subscription"
     };
 
-    /** ─────────────────────────────────────────
-     *  A) 구독(매월 자동이체) — Stripe Price IDs 사용
-     *  요청 바디의 payMode === "subscription" 이면 이 경로로
-     *  ───────────────────────────────────────── */
+    /* ───── A) 구독(매월 자동이체) ───── */
     if ((payMode || metadata.payMode || "").toLowerCase() === "subscription") {
       const domiPriceId = PRICE_DOMI_BY_PLAN[planId];
       if (!domiPriceId) {
         return res.status(400).json({
-          error: `Missing monthly Price ID for planId=${planId}. Check Vercel env (STRIPE_PRICE_DOMI_14/17/20/23).`,
+          error: `Missing monthly Price ID for planId=${planId}. Check env STRIPE_PRICE_DOMI_14/17/20/23.`,
         });
       }
 
@@ -147,13 +186,12 @@ export default async function handler(req, res) {
         mode: "subscription",
         billing_address_collection: "required",
         line_items,
-        // 수동 세율 고정 적용(각 Price에 tax rate를 붙여두지 않았다면 이 방식이 간단)
         subscription_data: TAX_RATE_ID
           ? { default_tax_rates: [TAX_RATE_ID], metadata: stringifyMeta(sessMeta) }
           : { metadata: stringifyMeta(sessMeta) },
         success_url: `${baseUrl}/pago?status=success&session_id={CHECKOUT_SESSION_ID}`,
         cancel_url: `${baseUrl}/pago?status=failed&canceled=1`,
-        metadata: stringifyMeta(sessMeta), // 세션/PI에도 메타 남김
+        metadata: stringifyMeta(sessMeta),
         customer_email: email || undefined,
         client_reference_id: leadId,
         locale: "auto",
@@ -167,9 +205,7 @@ export default async function handler(req, res) {
       });
     }
 
-    /** ─────────────────────────────────────────
-     *  B) 일시불(전액 선결제) — 기존 로직 유지
-     *  ───────────────────────────────────────── */
+    /* ───── B) 일시불(전액 선결제) ───── */
     const baseItem = UPFRONT_PRICE_TABLE[planId];
 
     const line_items = [
@@ -207,7 +243,7 @@ export default async function handler(req, res) {
 
     const session = await stripe.checkout.sessions.create({
       mode: "payment",
-      automatic_tax: { enabled: false }, // 수동세율 사용
+      automatic_tax: { enabled: false }, // 수동 세율
       billing_address_collection: "required",
       line_items,
       customer_email: email || undefined,
@@ -221,9 +257,16 @@ export default async function handler(req, res) {
 
     return res
       .status(200)
-      .json({ url: session.url, lead_id: leadId, session_id: session.id, mode: "payment" });
+      .json({
+        url: session.url,
+        lead_id: leadId,
+        session_id: session.id,
+        mode: "payment",
+      });
   } catch (err) {
     console.error(err);
-    return res.status(500).json({ error: err.message || "Internal server error" });
+    return res
+      .status(500)
+      .json({ error: err?.message || "Internal server error" });
   }
 }
