@@ -1,70 +1,101 @@
 // /api/airtable-upsert-register.ts
-// Upsert by lead_id → fields: register_type (+ customer_type / meta_stage)
-// Env: AIRTABLE_PAT, AIRTABLE_BASE_ID, AIRTABLE_TABLE_ID
-// CORS + OPTIONS 지원 (Framer 등 외부 도메인에서 호출 가능)
+// v1.2 — No-Auth (Origin allowlist only) + Airtable upsert by lead_id
+import type { VercelRequest, VercelResponse } from '@vercel/node'
 
-type ReqBody = {
-  lead_id: string;
-  register_type: "alta" | "cambio" | string;
-  customer_type?: "autonomo" | "empresa" | string;
-  meta_stage?: string;
-};
-
-const ALLOW_ORIGINS = (process.env.CORS_ALLOWED_ORIGINS || "")
-  .split(",")
+const AIRTABLE_API_KEY = process.env.AIRTABLE_API_KEY!
+const AIRTABLE_BASE_ID = process.env.AIRTABLE_BASE_ID!
+const AIRTABLE_TABLE_ID = process.env.AIRTABLE_TABLE_ID!  // table name 또는 tbl... ID 둘 다 가능
+const CORS_ALLOWED_ORIGINS = (process.env.CORS_ALLOWED_ORIGINS || 'https://ofinova-madrid.es,http://localhost:3000')
+  .split(',')
   .map(s => s.trim())
-  .filter(Boolean);
+  .filter(Boolean)
 
-// 기본: * 허용 (원하면 환경변수로 좁혀라)
-function setCors(res: any, origin?: string) {
-  const allow = ALLOW_ORIGINS.length ? (ALLOW_ORIGINS.includes(origin || "") ? origin : ALLOW_ORIGINS[0]) : "*";
-  res.setHeader("Access-Control-Allow-Origin", allow || "*");
-  res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
-  res.setHeader("Access-Control-Max-Age", "86400");
+function setCors(res: VercelResponse, origin?: string) {
+  if (origin && CORS_ALLOWED_ORIGINS.includes(origin)) {
+    res.setHeader('Access-Control-Allow-Origin', origin)
+  }
+  res.setHeader('Vary', 'Origin')
+  res.setHeader('Access-Control-Allow-Methods', 'POST,OPTIONS')
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization')
+  res.setHeader('Access-Control-Max-Age', '86400')
 }
 
-export default async function handler(req: any, res: any) {
-  setCors(res, req.headers.origin);
-  if (req.method === "OPTIONS") return res.status(200).end();
-  if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
+function bad(res: VercelResponse, code: number, msg: string) {
+  return res.status(code).json({ ok: false, error: msg })
+}
 
-  try {
-    const { lead_id, register_type, customer_type, meta_stage } = (req.body || {}) as ReqBody;
+type Payload = {
+  lead_id: string
+  register_type?: string
+  customer_type?: 'autonomo' | 'empresa' | string
+  meta_stage?: string
+}
 
-    if (!lead_id || !register_type) {
-      return res.status(400).json({ error: "lead_id and register_type are required" });
-    }
+export default async function handler(req: VercelRequest, res: VercelResponse) {
+  const origin = (req.headers.origin || '') as string
+  setCors(res, origin)
 
-    const apiUrl = `https://api.airtable.com/v0/${process.env.AIRTABLE_BASE_ID}/${process.env.AIRTABLE_TABLE_ID}`;
-    const r = await fetch(apiUrl, {
-      method: "PATCH",
-      headers: {
-        "Authorization": `Bearer ${process.env.AIRTABLE_PAT}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        performUpsert: { fieldsToMergeOn: ["lead_id"] },
-        records: [
-          {
-            fields: {
-              lead_id,
-              register_type,
-              ...(customer_type ? { customer_type } : {}),
-              ...(meta_stage ? { meta_stage } : {}),
-            },
-          },
-        ],
-      }),
-    });
+  // Preflight
+  if (req.method === 'OPTIONS') return res.status(204).end()
 
-    const data = await r.json();
-    if (!r.ok) {
-      return res.status(r.status).json({ airtable_error: data, hint: "Check base/table IDs and PAT scopes" });
-    }
-
-    return res.status(200).json({ ok: true, upserted: data?.records?.map((x: any) => x?.id) });
-  } catch (e: any) {
-    return res.status(500).json({ error: e?.message || String(e) });
+  // Origin allowlist
+  if (!origin || !CORS_ALLOWED_ORIGINS.includes(origin)) {
+    return bad(res, 403, 'forbidden_origin')
   }
+
+  if (req.method !== 'POST') {
+    return bad(res, 405, 'method_not_allowed')
+  }
+
+  // --- parse body
+  let body: Payload
+  try {
+    body = typeof req.body === 'string' ? JSON.parse(req.body) : req.body
+  } catch {
+    return bad(res, 400, 'invalid_json')
+  }
+  const { lead_id, register_type, customer_type, meta_stage } = body || {}
+  if (!lead_id || typeof lead_id !== 'string') {
+    return bad(res, 400, 'lead_id_required')
+  }
+
+  // --- build fields to upsert
+  const fields: Record<string, any> = {
+    meta_stage: meta_stage || 'type',
+    meta_updated_at: new Date().toISOString(),
+  }
+  if (register_type) fields['register_type'] = String(register_type)
+  if (customer_type) fields['customer_type'] = String(customer_type)
+
+  // --- Airtable helpers
+  const baseUrl = `https://api.airtable.com/v0/${AIRTABLE_BASE_ID}/${encodeURIComponent(AIRTABLE_TABLE_ID)}`
+  const headers = {
+    Authorization: `Bearer ${AIRTABLE_API_KEY}`,
+    'Content-Type': 'application/json',
+  }
+
+  // 1) find by lead_id
+  const formula = `({lead_id} = "${lead_id.replace(/"/g, '\\"')}")`
+  const findUrl = `${baseUrl}?maxRecords=1&filterByFormula=${encodeURIComponent(formula)}`
+  const found = await fetch(findUrl, { headers }).then(r => r.json() as any).catch(() => null)
+
+  const recId: string | undefined = found?.records?.[0]?.id
+
+  // 2) upsert (patch if exists, else create)
+  if (recId) {
+    await fetch(`${baseUrl}/${recId}`, {
+      method: 'PATCH',
+      headers,
+      body: JSON.stringify({ fields }),
+    }).then(r => r.json()).catch(() => null)
+  } else {
+    await fetch(baseUrl, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ records: [{ fields: { lead_id, ...fields } }] }),
+    }).then(r => r.json()).catch(() => null)
+  }
+
+  // Done
+  return res.status(204).end()
 }
