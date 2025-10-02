@@ -1,7 +1,7 @@
 // api/create-checkout-session.js
-// 2025-10 | v2.7
-// - Harden shipping extraction: support many field names and locations
-// - Keep fire-and-forget POST to Make (checkout.submit)
+// 2025-10 | v2.8
+// - Fix: Make webhook body shape -> { value: JSON.stringify(payload) } to satisfy JSON module
+// - Keep: robust shipping extraction + fire-and-forget POST to Make
 // - Supports one-off (payment) and monthly (subscription)
 
 import Stripe from "stripe";
@@ -133,12 +133,16 @@ const MAKE_CHECKOUT_WEBHOOK_URL = process.env.MAKE_CHECKOUT_WEBHOOK_URL || "";
 function postToMake(payload) {
   if (!MAKE_CHECKOUT_WEBHOOK_URL) return;
   try {
+    // IMPORTANT: Make JSON module expects "1.value" mapping.
+    // Send { value: "<stringified-payload>" } so 2nd module can parse it.
     fetch(MAKE_CHECKOUT_WEBHOOK_URL, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
+      body: JSON.stringify({ value: JSON.stringify(payload) }),
     }).catch(() => {});
-  } catch {}
+  } catch {
+    // swallow
+  }
 }
 
 /* ───────── Handler ───────── */
@@ -220,6 +224,9 @@ export default async function handler(req, res) {
       mailPlan: mailPlan || "",
       want_gestoria: String(wantGestoria ? 1 : 0),
       mode,
+      // Keep in Stripe metadata for traceability
+      shipping_address: shippingAddress || "",
+      shipping_notes: shippingNotes || "",
     };
 
     // fire-and-forget → Make
