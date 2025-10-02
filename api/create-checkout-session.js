@@ -1,6 +1,7 @@
 // api/create-checkout-session.js
-// 2025-10 | v2.3
-// - Add: include `shipping.address` and `shipping.notes` in fire-and-forget POST to Make
+// 2025-10 | v2.4
+// - Send to Make as { value: JSON.stringify(payload) }  ← Make JSON step keeps using 1.value
+// - Include shipping.address / shipping.notes
 // - Keep: pay_mode_choice / want_gestoria reporting
 // - CORS hardening + wildcard
 // - Supports one-off (payment) and monthly (subscription)
@@ -127,13 +128,14 @@ function normMailPlan(s) {
 
 /* ───────── Fire-and-forget POST to Make (checkout.submit) ───────── */
 const MAKE_CHECKOUT_WEBHOOK_URL = process.env.MAKE_CHECKOUT_WEBHOOK_URL || "";
-function postToMake(payload) {
+async function postToMake(payload) {
   if (!MAKE_CHECKOUT_WEBHOOK_URL) return;
   try {
-    fetch(MAKE_CHECKOUT_WEBHOOK_URL, {
+    // IMPORTANT: Make가 기대하는 형태로 래핑 → { value: "…json…" }
+    await fetch(MAKE_CHECKOUT_WEBHOOK_URL, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
+      body: JSON.stringify({ value: JSON.stringify(payload) }),
     }).catch(() => {});
   } catch {
     // swallow
@@ -177,14 +179,30 @@ export default async function handler(req, res) {
     let shippingAddress = "";
     let shippingNotes = "";
     try {
-      const shippingRaw = (metadata.shipping && typeof metadata.shipping === "string")
-        ? JSON.parse(metadata.shipping)
-        : (metadata.shipping || {});
-      shippingAddress = String(shippingRaw.address || metadata.address || "").trim();
-      shippingNotes   = String(shippingRaw.notes   || metadata.notes   || "").trim();
+      const shippingRaw =
+        typeof metadata.shipping === "string"
+          ? JSON.parse(metadata.shipping)
+          : (metadata.shipping || {});
+      shippingAddress = String(
+        shippingRaw.address ??
+        metadata.address ??
+        metadata.mail_address ??
+        ""
+      ).trim();
+      shippingNotes = String(
+        shippingRaw.notes ??
+        metadata.addressNotes ??
+        metadata.mail_address_notes ??
+        metadata.notes ??
+        ""
+      ).trim();
     } catch {
-      shippingAddress = String(metadata.address || "").trim();
-      shippingNotes   = String(metadata.notes   || "").trim();
+      shippingAddress = String(
+        metadata.address ?? metadata.mail_address ?? ""
+      ).trim();
+      shippingNotes = String(
+        metadata.addressNotes ?? metadata.mail_address_notes ?? metadata.notes ?? ""
+      ).trim();
     }
 
     const sessMeta = {
@@ -199,8 +217,8 @@ export default async function handler(req, res) {
       mode, // "payment" | "subscription"
     };
 
-    // Send light payload to Make (non-blocking)
-    postToMake({
+    // Send to Make (non-blocking)
+    await postToMake({
       schema_version: "v1",
       event: "checkout.submit",
       meta: {
