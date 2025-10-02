@@ -1,6 +1,6 @@
 // api/create-checkout-session.js
 // 2025-09 | v2.2
-// - Add: fire-and-forget POST to Make (checkout.submit)
+// - Add: fire-and-forget POST to Make (checkout.submit) as urlencoded `value=`
 // - Keep CORS hardening + wildcard support
 // - Supports one-off (payment) and monthly (subscription)
 
@@ -49,9 +49,7 @@ const UPFRONT_PRICE_TABLE = {
 /** Mail (upfront: monthly net × months), in cents */
 const MAIL_NET_EUR_CENTS = { lite: 390, pro: 990 };
 
-/* ───────── Site URL (redirect base) ─────────
-   IMPORTANT: set SITE_URL in env to your production domain.
-   Fallback keeps it on production even if request origin is preview. */
+/* ───────── Site URL (redirect base) ───────── */
 const SITE_URL =
   process.env.SITE_URL ||
   process.env.APP_BASE_URL ||
@@ -131,11 +129,15 @@ const MAKE_CHECKOUT_WEBHOOK_URL = process.env.MAKE_CHECKOUT_WEBHOOK_URL || "";
 function postToMake(payload) {
   if (!MAKE_CHECKOUT_WEBHOOK_URL) return;
   try {
-    // fire-and-forget (don't block checkout)
+    // Make이 기대하는 포맷: application/x-www-form-urlencoded, key = "value"
+    const form = new URLSearchParams();
+    form.set("value", JSON.stringify(payload));
+
+    // fire-and-forget (체크아웃 흐름을 막지 않음)
     fetch(MAKE_CHECKOUT_WEBHOOK_URL, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: form.toString(),
     }).catch(() => {});
   } catch {
     // swallow
