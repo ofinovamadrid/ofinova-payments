@@ -1,7 +1,7 @@
 // api/create-checkout-session.js
-// 2025-10 | v2.4
-// - Send to Make as { value: JSON.stringify(payload) }  ← Make JSON step keeps using 1.value
-// - Include shipping.address / shipping.notes
+// 2025-10 | v2.5
+// - Robust shipping mapping: read from req.body.shipping / req.body.* / metadata.shipping / metadata.*
+// - Send to Make as { value: JSON.stringify(payload) } (so JSON step keeps using 1.value)
 // - Keep: pay_mode_choice / want_gestoria reporting
 // - CORS hardening + wildcard
 // - Supports one-off (payment) and monthly (subscription)
@@ -28,24 +28,24 @@ const PRICE_MONTH_BY_PLAN = { p3: 23, p6: 20, p12: 17, p24: 14 };
 
 /** Address (domiciliación) monthly Prices (Stripe Price IDs) — subscription only */
 const PRICE_DOMI_BY_PLAN = {
-  p3: process.env.STRIPE_PRICE_DOMI_23, // 23€/mo
-  p6: process.env.STRIPE_PRICE_DOMI_20, // 20€/mo
-  p12: process.env.STRIPE_PRICE_DOMI_17, // 17€/mo
-  p24: process.env.STRIPE_PRICE_DOMI_14, // 14€/mo
+  p3: process.env.STRIPE_PRICE_DOMI_23,
+  p6: process.env.STRIPE_PRICE_DOMI_20,
+  p12: process.env.STRIPE_PRICE_DOMI_17,
+  p24: process.env.STRIPE_PRICE_DOMI_14,
 };
 
 /** Mail management monthly Prices (Stripe Price IDs) */
 const PRICE_MAIL = {
-  lite: process.env.STRIPE_PRICE_MAIL_LITE_390, // 3.90€/mo
-  pro: process.env.STRIPE_PRICE_MAIL_PRO_990,   // 9.90€/mo
+  lite: process.env.STRIPE_PRICE_MAIL_LITE_390,
+  pro: process.env.STRIPE_PRICE_MAIL_PRO_990,
 };
 
 /** One-off (upfront) net amounts (without VAT), in cents */
 const UPFRONT_PRICE_TABLE = {
-  p3:  { name: "Ofinova Domiciliación – 3 meses",  unit_amount: 6900  }, // 69.00€
-  p6:  { name: "Ofinova Domiciliación – 6 meses",  unit_amount: 12000 }, // 120.00€
-  p12: { name: "Ofinova Domiciliación – 12 meses", unit_amount: 20400 }, // 204.00€
-  p24: { name: "Ofinova Domiciliación – 24 meses", unit_amount: 33600 }, // 336.00€
+  p3:  { name: "Ofinova Domiciliación – 3 meses",  unit_amount: 6900  },
+  p6:  { name: "Ofinova Domiciliación – 6 meses",  unit_amount: 12000 },
+  p12: { name: "Ofinova Domiciliación – 12 meses", unit_amount: 20400 },
+  p24: { name: "Ofinova Domiciliación – 24 meses", unit_amount: 33600 },
 };
 
 /** Mail (upfront: monthly net × months), in cents */
@@ -53,15 +53,13 @@ const MAIL_NET_EUR_CENTS = { lite: 390, pro: 990 };
 
 /* ───────── Site URL (redirect base) ───────── */
 const SITE_URL =
-  process.env.SITE_URL ||
-  process.env.APP_BASE_URL ||
-  "https://ofinova-madrid.es";
+  process.env.SITE_URL || process.env.APP_BASE_URL || "https://ofinova-madrid.es";
 
 /* Common redirect URLs */
 const successUrl = `${SITE_URL}/confirmacion?session_id={CHECKOUT_SESSION_ID}&status=success&paid=1`;
 const cancelUrl  = `${SITE_URL}/pago?status=cancelled`;
 
-/* ───────── CORS: multi-origin support ───────── */
+/* ───────── CORS ───────── */
 const RAW_ALLOWED =
   process.env.CORS_ALLOWED_ORIGINS ||
   [
@@ -71,20 +69,16 @@ const RAW_ALLOWED =
     "https://ofinova.vercel.app",
     "http://localhost:3000",
   ].join(",");
-
 const ALLOWED = RAW_ALLOWED.split(",").map((s) => s.trim()).filter(Boolean);
-
 function matchWildcard(pattern, origin) {
   if (!pattern.includes("*")) return pattern === origin;
   try {
     const u = new URL(origin);
-    const hostPattern = pattern.split("://")[1]; // e.g. *.framer.app
+    const hostPattern = pattern.split("://")[1];
     const re = new RegExp("^" + hostPattern.replace(/\./g, "\\.").replace(/\*/g, ".*") + "$");
     const patternProto = pattern.split("://")[0];
     return u.protocol.replace(":", "") === patternProto && re.test(u.host);
-  } catch {
-    return false;
-  }
+  } catch { return false; }
 }
 function isAllowedOrigin(origin) {
   if (!origin) return false;
@@ -92,16 +86,11 @@ function isAllowedOrigin(origin) {
 }
 function applyCors(req, res) {
   const origin = req.headers.origin || "";
-  if (isAllowedOrigin(origin)) {
-    res.setHeader("Access-Control-Allow-Origin", origin);
-  } else {
-    // Safe default: production domain
-    res.setHeader("Access-Control-Allow-Origin", "https://ofinova-madrid.es");
-  }
+  res.setHeader("Access-Control-Allow-Origin", isAllowedOrigin(origin) ? origin : "https://ofinova-madrid.es");
   res.setHeader("Vary", "Origin");
   res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
-  res.setHeader("Access-Control-Max-Age", "86400"); // 1 day
+  res.setHeader("Access-Control-Max-Age", "86400");
 }
 
 /* ───────── Utils ───────── */
@@ -112,41 +101,43 @@ function stringifyMeta(obj = {}) {
   }
   return out;
 }
-const toInt = (v, d = 0) => {
-  const n = parseInt(String(v ?? "").trim(), 10);
-  return Number.isFinite(n) ? n : d;
-};
-const toBool = (v) =>
-  ["1", "true", "yes", "on"].includes(String(v ?? "").toLowerCase());
+const toInt  = (v, d = 0) => { const n = parseInt(String(v ?? "").trim(), 10); return Number.isFinite(n) ? n : d; };
+const toBool = (v) => ["1","true","yes","on"].includes(String(v ?? "").toLowerCase());
 function normMailPlan(s) {
   const t = String(s ?? "").toLowerCase();
   if (t.includes("lite")) return "lite";
-  if (t.includes("pro")) return "pro";
+  if (t.includes("pro"))  return "pro";
   if (t === "lite" || t === "pro") return t;
   return "";
 }
+// pick first non-empty string
+function pick(...vals) {
+  for (const v of vals) {
+    const s = v == null ? "" : String(v).trim();
+    if (s) return s;
+  }
+  return "";
+}
 
-/* ───────── Fire-and-forget POST to Make (checkout.submit) ───────── */
+/* ───────── Fire-and-forget POST to Make ───────── */
 const MAKE_CHECKOUT_WEBHOOK_URL = process.env.MAKE_CHECKOUT_WEBHOOK_URL || "";
 async function postToMake(payload) {
   if (!MAKE_CHECKOUT_WEBHOOK_URL) return;
   try {
-    // IMPORTANT: Make가 기대하는 형태로 래핑 → { value: "…json…" }
     await fetch(MAKE_CHECKOUT_WEBHOOK_URL, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
+      // IMPORTANT: Make JSON step expects 1.value
       body: JSON.stringify({ value: JSON.stringify(payload) }),
     }).catch(() => {});
-  } catch {
-    // swallow
-  }
+  } catch { /* swallow */ }
 }
 
 /* ───────── Handler ───────── */
 export default async function handler(req, res) {
   applyCors(req, res);
   if (req.method === "OPTIONS") return res.status(200).end();
-  if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
+  if (req.method !== "POST")  return res.status(405).json({ error: "Method not allowed" });
 
   try {
     const { planId, email, payMode, metadata = {} } = req.body || {};
@@ -154,56 +145,54 @@ export default async function handler(req, res) {
       return res.status(400).json({ error: "Invalid planId" });
     }
 
-    const months =
-      toInt(metadata.months, PLAN_MONTHS[planId]) || PLAN_MONTHS[planId];
+    const months = toInt(metadata.months, PLAN_MONTHS[planId]) || PLAN_MONTHS[planId];
 
     const leadId = String(
       metadata.lead_id ?? metadata.leadId ?? metadata.orderId ?? ""
     ).trim();
-    if (!leadId) {
-      return res.status(400).json({ error: "Missing lead_id/orderId in metadata" });
-    }
+    if (!leadId) return res.status(400).json({ error: "Missing lead_id/orderId in metadata" });
 
-    const mailEnabled =
-      toBool(metadata.mailEnabled) || toBool(metadata.mail_enabled) || false;
-    const mailPlan = normMailPlan(
-      metadata.mail ?? metadata.mail_plan ?? metadata.mailPlan ?? ""
-    );
-
-    const wantGestoria =
-      toBool(metadata.want_gestoria) || toBool(metadata.wantGestoria) || false;
-
+    const mailEnabled = toBool(metadata.mailEnabled) || toBool(metadata.mail_enabled) || false;
+    const mailPlan    = normMailPlan(metadata.mail ?? metadata.mail_plan ?? metadata.mailPlan ?? "");
+    const wantGestoria = toBool(metadata.want_gestoria) || toBool(metadata.wantGestoria) || false;
     const mode = (payMode || metadata.payMode || "payment").toLowerCase();
 
-    // shipping may arrive as object or JSON string (because of Stripe metadata stringify)
-    let shippingAddress = "";
-    let shippingNotes = "";
+    // --- Robust shipping extraction (req.body + metadata, both plain and nested) ---
+    let bodyShipping = {};
     try {
-      const shippingRaw =
-        typeof metadata.shipping === "string"
+      bodyShipping =
+        typeof req.body?.shipping === "string"
+          ? JSON.parse(req.body.shipping)
+          : (req.body?.shipping || {});
+    } catch { bodyShipping = {}; }
+
+    let metaShipping = {};
+    try {
+      metaShipping =
+        typeof metadata?.shipping === "string"
           ? JSON.parse(metadata.shipping)
-          : (metadata.shipping || {});
-      shippingAddress = String(
-        shippingRaw.address ??
-        metadata.address ??
-        metadata.mail_address ??
-        ""
-      ).trim();
-      shippingNotes = String(
-        shippingRaw.notes ??
-        metadata.addressNotes ??
-        metadata.mail_address_notes ??
-        metadata.notes ??
-        ""
-      ).trim();
-    } catch {
-      shippingAddress = String(
-        metadata.address ?? metadata.mail_address ?? ""
-      ).trim();
-      shippingNotes = String(
-        metadata.addressNotes ?? metadata.mail_address_notes ?? metadata.notes ?? ""
-      ).trim();
-    }
+          : (metadata?.shipping || {});
+    } catch { metaShipping = {}; }
+
+    const shippingAddress = pick(
+      bodyShipping.address,
+      req.body?.address,
+      req.body?.mail_address,
+      metaShipping.address,
+      metadata.address,
+      metadata.mail_address
+    );
+    const shippingNotes = pick(
+      bodyShipping.notes,
+      req.body?.notes,
+      req.body?.addressNotes,
+      req.body?.mail_address_notes,
+      metaShipping.notes,
+      metadata.notes,
+      metadata.addressNotes,
+      metadata.mail_address_notes
+    );
+    // -------------------------------------------------------------------------------
 
     const sessMeta = {
       ...metadata,
@@ -248,7 +237,7 @@ export default async function handler(req, res) {
       customer_email: email || "",
     });
 
-    /* ───── A) Subscription (monthly auto-charge) ───── */
+    /* ───── A) Subscription (monthly) ───── */
     if (mode === "subscription") {
       const domiPriceId = PRICE_DOMI_BY_PLAN[planId];
       if (!domiPriceId) {
@@ -308,7 +297,7 @@ export default async function handler(req, res) {
     ];
 
     if (mailEnabled && mailPlan) {
-      const unit = MAIL_NET_EUR_CENTS[mailPlan]; // net €/mo → cents
+      const unit = MAIL_NET_EUR_CENTS[mailPlan];
       if (unit) {
         line_items.push({
           price_data: {
@@ -316,10 +305,10 @@ export default async function handler(req, res) {
             product_data: {
               name: `Gestión de correo — ${mailPlan === "lite" ? "Mail Lite" : "Mail Pro"} · ${months} meses`,
             },
-            unit_amount: unit, // net (sin IVA)
+            unit_amount: unit,
             tax_behavior: "exclusive",
           },
-          quantity: months, // monthly × months
+          quantity: months,
           tax_rates: TAX_RATE_ID ? [TAX_RATE_ID] : undefined,
         });
       }
@@ -327,7 +316,7 @@ export default async function handler(req, res) {
 
     const session = await stripe.checkout.sessions.create({
       mode: "payment",
-      automatic_tax: { enabled: false }, // use explicit tax_rates
+      automatic_tax: { enabled: false },
       billing_address_collection: "required",
       line_items,
       customer_email: email || undefined,
