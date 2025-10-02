@@ -1,22 +1,18 @@
 // api/create-checkout-session.js
-// 2025-10 | v2.5
-// - Ensure Make POST is delivered: await fetch with 1s timeout
-// - Keep JSON-Parse(1.value) shape: send { value: "<json>" }
-// - Shipping: top-level -> metadata.shipping -> address/notes fallbacks
+// 2025-10 | v2.6
+// - Ensure Make POST really fires: await with 1s timeout + fallback try
+// - Send body as { value: "<json>" } to match Make's JSON-Parse(1.value)
+// - Keep pay_mode_choice / want_gestoria
+// - Try to pick shipping from body.shipping OR metadata.shipping OR metadata.address/notes
 
 import Stripe from "stripe";
 
 if (!process.env.STRIPE_SECRET_KEY) {
   throw new Error("Missing STRIPE_SECRET_KEY env var");
 }
+const stripe = new Stripe(process.env.STRIPE_SECRET_KEY, { apiVersion: "2024-06-20" });
 
-const stripe = new Stripe(process.env.STRIPE_SECRET_KEY, {
-  apiVersion: "2024-06-20",
-});
-
-const TAX_RATE_ID =
-  process.env.STRIPE_TAX_RATE_ID || "txr_1S9RT93pToW48VXP6fB9vkUy";
-
+const TAX_RATE_ID = process.env.STRIPE_TAX_RATE_ID || "txr_1S9RT93pToW48VXP6fB9vkUy";
 const PLAN_MONTHS = { p3: 3, p6: 6, p12: 12, p24: 24 };
 const PRICE_MONTH_BY_PLAN = { p3: 23, p6: 20, p12: 17, p24: 14 };
 const PRICE_DOMI_BY_PLAN = {
@@ -37,11 +33,7 @@ const UPFRONT_PRICE_TABLE = {
 };
 const MAIL_NET_EUR_CENTS = { lite: 390, pro: 990 };
 
-const SITE_URL =
-  process.env.SITE_URL ||
-  process.env.APP_BASE_URL ||
-  "https://ofinova-madrid.es";
-
+const SITE_URL = process.env.SITE_URL || process.env.APP_BASE_URL || "https://ofinova-madrid.es";
 const successUrl = `${SITE_URL}/confirmacion?session_id={CHECKOUT_SESSION_ID}&status=success&paid=1`;
 const cancelUrl  = `${SITE_URL}/pago?status=cancelled`;
 
@@ -59,26 +51,23 @@ function matchWildcard(pattern, origin) {
   if (!pattern.includes("*")) return pattern === origin;
   try {
     const u = new URL(origin);
-    const hostPattern = pattern.split("://")[1];
-    const re = new RegExp("^" + hostPattern.replace(/\./g,"\\.").replace(/\*/g,".*") + "$");
+    const host = pattern.split("://")[1];
+    const re = new RegExp("^" + host.replace(/\./g,"\\.").replace(/\*/g,".*") + "$");
     const proto = pattern.split("://")[0];
     return u.protocol.replace(":","")===proto && re.test(u.host);
   } catch { return false; }
 }
-function isAllowedOrigin(origin){ return origin && ALLOWED.some(p=>matchWildcard(p,origin)); }
+function isAllowedOrigin(o){ return o && ALLOWED.some(p=>matchWildcard(p,o)); }
 function applyCors(req,res){
-  const origin = req.headers.origin || "";
-  res.setHeader("Access-Control-Allow-Origin", isAllowedOrigin(origin)?origin:"https://ofinova-madrid.es");
+  const o = req.headers.origin || "";
+  res.setHeader("Access-Control-Allow-Origin", isAllowedOrigin(o)?o:"https://ofinova-madrid.es");
   res.setHeader("Vary","Origin");
   res.setHeader("Access-Control-Allow-Methods","POST, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers","Content-Type, Authorization");
   res.setHeader("Access-Control-Max-Age","86400");
 }
 
-function stringifyMeta(obj={}) {
-  const out={}; for (const [k,v] of Object.entries(obj)) out[k]=typeof v==="string"?v:JSON.stringify(v);
-  return out;
-}
+function stringifyMeta(obj={}){ const out={}; for (const [k,v] of Object.entries(obj)) out[k]=typeof v==="string"?v:JSON.stringify(v); return out; }
 const toInt = (v,d=0)=>{ const n=parseInt(String(v??"").trim(),10); return Number.isFinite(n)?n:d; };
 const toBool = v => ["1","true","yes","on"].includes(String(v??"").toLowerCase());
 function normMailPlan(s){ const t=String(s??"").toLowerCase(); if(t.includes("lite"))return"lite"; if(t.includes("pro"))return"pro"; if(t==="lite"||t==="pro")return t; return ""; }
@@ -87,21 +76,48 @@ function safeParseJSON(s,fallback={}){ try{return JSON.parse(s);}catch{return fa
 
 /* ── Make webhook ── */
 const MAKE_CHECKOUT_WEBHOOK_URL = process.env.MAKE_CHECKOUT_WEBHOOK_URL || "";
-async function postToMake(payload){
-  if (!MAKE_CHECKOUT_WEBHOOK_URL) return;
-  // 서버리스에서 조기 종료 방지: 1초만 기다림
+async function postToMakeOnce(payload){
+  if (!MAKE_CHECKOUT_WEBHOOK_URL) {
+    console.log("[MAKE] skipped: empty webhook url");
+    return false;
+  }
   const ac = new AbortController();
-  const timer = setTimeout(()=>ac.abort(), 1000);
+  const timer = setTimeout(()=>ac.abort(), 1000); // 1s hard timeout
   try {
-    await fetch(MAKE_CHECKOUT_WEBHOOK_URL, {
+    const res = await fetch(MAKE_CHECKOUT_WEBHOOK_URL, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
-      // Make JSON-Parse(1.value) 호환
+      headers: { "Content-Type": "application/json", "Accept": "application/json" },
+      // Make의 JSON-Parse(1.value) 그대로 사용 가능하도록
       body: JSON.stringify({ value: JSON.stringify(payload) }),
       signal: ac.signal,
     });
-  } catch { /* ignore */ }
-  finally { clearTimeout(timer); }
+    console.log("[MAKE] status:", res.status);
+    return res.ok;
+  } catch (e) {
+    console.log("[MAKE] error:", e?.message || e);
+    return false;
+  } finally { clearTimeout(timer); }
+}
+async function postToMake(payload){
+  // 1차 시도
+  let ok = await postToMakeOnce(payload);
+  // 실패 시 백업 시도(원본을 그대로 보냄: 트리거만이라도 걸리도록)
+  if (!ok) {
+    try {
+      const ac = new AbortController();
+      const t = setTimeout(()=>ac.abort(), 1000);
+      const res = await fetch(MAKE_CHECKOUT_WEBHOOK_URL, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+        signal: ac.signal,
+      });
+      console.log("[MAKE][fallback] status:", res.status);
+      clearTimeout(t);
+    } catch (e) {
+      console.log("[MAKE][fallback] error:", e?.message || e);
+    }
+  }
 }
 
 /* ── Handler ── */
@@ -124,6 +140,7 @@ export default async function handler(req,res){
     const mailPlan = normMailPlan(metadata.mail ?? metadata.mail_plan ?? metadata.mailPlan ?? "");
     const wantGestoria = toBool(metadata.want_gestoria) || toBool(metadata.wantGestoria) || false;
 
+    // shipping: body.shipping > metadata.shipping(JSON/string) > metadata.address/notes
     const shippingMeta = typeof metadata.shipping === "string"
       ? safeParseJSON(metadata.shipping, {})
       : (metadata.shipping || {});
@@ -144,7 +161,7 @@ export default async function handler(req,res){
       mode,
     };
 
-    // Make에 먼저 보고(1초 제한으로 await)
+    // 🔸 Make에 먼저 보고 (1초 대기 보장)
     await postToMake({
       schema_version: "v1",
       event: "checkout.submit",
@@ -172,18 +189,16 @@ export default async function handler(req,res){
       customer_email: email || "",
     });
 
-    /* Subscription */
+    // ── Stripe 부분 동일 ──
     if (mode==="subscription"){
       const domiPriceId = PRICE_DOMI_BY_PLAN[planId];
       if (!domiPriceId) return res.status(400).json({ error: `Missing monthly Price ID for planId=${planId}.` });
-
       const line_items=[{price:domiPriceId,quantity:1}];
-      if (mailEnabled) {
+      if (mailEnabled){
         const mailPriceId = PRICE_MAIL[mailPlan];
         if (!mailPriceId) return res.status(400).json({ error:"Mail plan invalid or missing env Price ID." });
         line_items.push({price:mailPriceId,quantity:1});
       }
-
       const session = await stripe.checkout.sessions.create({
         mode:"subscription",
         billing_address_collection:"required",
@@ -198,18 +213,15 @@ export default async function handler(req,res){
         client_reference_id: leadId,
         locale:"auto",
       });
-
       return res.status(200).json({ url: session.url, lead_id: leadId, session_id: session.id, mode:"subscription" });
     }
 
-    /* One-off */
     const baseItem = UPFRONT_PRICE_TABLE[planId];
     const line_items=[{
       price_data:{ currency:"eur", product_data:{name:baseItem.name}, unit_amount:baseItem.unit_amount, tax_behavior:"exclusive" },
       quantity:1,
       tax_rates: TAX_RATE_ID ? [TAX_RATE_ID] : undefined,
     }];
-
     if (mailEnabled && mailPlan){
       const unit = MAIL_NET_EUR_CENTS[mailPlan];
       if (unit){
@@ -225,7 +237,6 @@ export default async function handler(req,res){
         });
       }
     }
-
     const session = await stripe.checkout.sessions.create({
       mode:"payment",
       automatic_tax:{enabled:false},
@@ -239,7 +250,6 @@ export default async function handler(req,res){
       client_reference_id: leadId,
       locale:"auto",
     });
-
     return res.status(200).json({ url: session.url, lead_id: leadId, session_id: session.id, mode:"payment" });
   } catch (err) {
     console.error(err);
