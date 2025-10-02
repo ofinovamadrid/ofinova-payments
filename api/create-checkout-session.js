@@ -1,10 +1,8 @@
-\
-// api/create-checkout-session.js 
+// api/create-checkout-session.js
 // 2025-09 | v2.2
-// - Add: server → Make webhook ping (checkout.submit) to avoid CSP issues
-// - Fix: Always redirect to production domain + /confirmacion on success
-// - CORS hardening + wildcard support
-// - Supports both one-off (payment) and monthly (subscription)
+// - Add: fire-and-forget POST to Make (checkout.submit)
+// - Keep CORS hardening + wildcard support
+// - Supports one-off (payment) and monthly (subscription)
 
 import Stripe from "stripe";
 
@@ -23,7 +21,7 @@ const TAX_RATE_ID =
 /** Landing ‘planId’ → months */
 const PLAN_MONTHS = { p3: 3, p6: 6, p12: 12, p24: 24 };
 
-/** Monthly price by plan, in EUR (for Make payload info only) */
+/** Monthly price (for reporting to Make) */
 const PRICE_MONTH_BY_PLAN = { p3: 23, p6: 20, p12: 17, p24: 14 };
 
 /** Address (domiciliación) monthly Prices (Stripe Price IDs) — subscription only */
@@ -128,18 +126,19 @@ function normMailPlan(s) {
   return "";
 }
 
-/* ---- Make Webhook helper (send checkout.submit) ---- */
-async function sendCheckoutSubmitToMake(payload = {}) {
-  const url = process.env.MAKE_CHECKOUT_WEBHOOK_URL;
-  if (!url) return;
+/* ───────── Fire-and-forget POST to Make (checkout.submit) ───────── */
+const MAKE_CHECKOUT_WEBHOOK_URL = process.env.MAKE_CHECKOUT_WEBHOOK_URL || "";
+function postToMake(payload) {
+  if (!MAKE_CHECKOUT_WEBHOOK_URL) return;
   try {
-    await fetch(url, {
+    // fire-and-forget (don't block checkout)
+    fetch(MAKE_CHECKOUT_WEBHOOK_URL, {
       method: "POST",
-      headers: { "Content-Type": "text/plain" }, // Make JSON 모듈이 1.value로 읽도록
+      headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
-    });
-  } catch (e) {
-    // Optional: console.log("Make ping failed", e);
+    }).catch(() => {});
+  } catch {
+    // swallow
   }
 }
 
@@ -155,8 +154,7 @@ export default async function handler(req, res) {
       return res.status(400).json({ error: "Invalid planId" });
     }
 
-    const months =
-      toInt(metadata.months, PLAN_MONTHS[planId]) || PLAN_MONTHS[planId];
+    const months = toInt(metadata.months, PLAN_MONTHS[planId]) || PLAN_MONTHS[planId];
 
     const leadId = String(
       metadata.lead_id ?? metadata.leadId ?? metadata.orderId ?? ""
@@ -171,11 +169,10 @@ export default async function handler(req, res) {
       metadata.mail ?? metadata.mail_plan ?? metadata.mailPlan ?? ""
     );
 
-    const mode = (payMode || metadata.payMode || "payment").toLowerCase();
-
-    // Support multiple possible keys for want_gestoria coming from frontend
     const wantGestoria =
       toBool(metadata.want_gestoria) || toBool(metadata.wantGestoria) || false;
+
+    const mode = (payMode || metadata.payMode || "payment").toLowerCase();
 
     const sessMeta = {
       ...metadata,
@@ -185,16 +182,19 @@ export default async function handler(req, res) {
       months,
       mailEnabled: String(mailEnabled ? 1 : 0),
       mailPlan: mailPlan || "",
+      want_gestoria: String(wantGestoria ? 1 : 0),
       mode, // "payment" | "subscription"
     };
 
-    /* ---- Make ping (checkout.submit) ---- */
-    // Build a small, stable payload for Make. This does not affect Stripe flow.
-    const checkoutSubmit = {
+    // Send light payload to Make (non-blocking)
+    postToMake({
       schema_version: "v1",
       event: "checkout.submit",
       meta: {
         lead_id: leadId,
+        source: "vercel-api",
+        env: "prod",
+        stage: "payment",
         pay_mode_choice: mode,
       },
       company: {
@@ -207,13 +207,11 @@ export default async function handler(req, res) {
       },
       options: {
         mail_enabled: mailEnabled ? 1 : 0,
-        mail_plan: mailPlan || "",
+        mail_plan: mailPlan || "none",
         want_gestoria: wantGestoria ? 1 : 0,
       },
       customer_email: email || "",
-    };
-    // Fire and forget (await for ordering/logging)
-    await sendCheckoutSubmitToMake(checkoutSubmit);
+    });
 
     /* ───── A) Subscription (monthly auto-charge) ───── */
     if (mode === "subscription") {
