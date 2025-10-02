@@ -1,5 +1,7 @@
-// api/create-checkout-session.js
-// 2025-09 | v2.1
+\
+// api/create-checkout-session.js 
+// 2025-09 | v2.2
+// - Add: server → Make webhook ping (checkout.submit) to avoid CSP issues
 // - Fix: Always redirect to production domain + /confirmacion on success
 // - CORS hardening + wildcard support
 // - Supports both one-off (payment) and monthly (subscription)
@@ -20,6 +22,9 @@ const TAX_RATE_ID =
 
 /** Landing ‘planId’ → months */
 const PLAN_MONTHS = { p3: 3, p6: 6, p12: 12, p24: 24 };
+
+/** Monthly price by plan, in EUR (for Make payload info only) */
+const PRICE_MONTH_BY_PLAN = { p3: 23, p6: 20, p12: 17, p24: 14 };
 
 /** Address (domiciliación) monthly Prices (Stripe Price IDs) — subscription only */
 const PRICE_DOMI_BY_PLAN = {
@@ -123,6 +128,21 @@ function normMailPlan(s) {
   return "";
 }
 
+/* ---- Make Webhook helper (send checkout.submit) ---- */
+async function sendCheckoutSubmitToMake(payload = {}) {
+  const url = process.env.MAKE_CHECKOUT_WEBHOOK_URL;
+  if (!url) return;
+  try {
+    await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "text/plain" }, // Make JSON 모듈이 1.value로 읽도록
+      body: JSON.stringify(payload),
+    });
+  } catch (e) {
+    // Optional: console.log("Make ping failed", e);
+  }
+}
+
 /* ───────── Handler ───────── */
 export default async function handler(req, res) {
   applyCors(req, res);
@@ -152,6 +172,11 @@ export default async function handler(req, res) {
     );
 
     const mode = (payMode || metadata.payMode || "payment").toLowerCase();
+
+    // Support multiple possible keys for want_gestoria coming from frontend
+    const wantGestoria =
+      toBool(metadata.want_gestoria) || toBool(metadata.wantGestoria) || false;
+
     const sessMeta = {
       ...metadata,
       lead_id: leadId,
@@ -162,6 +187,33 @@ export default async function handler(req, res) {
       mailPlan: mailPlan || "",
       mode, // "payment" | "subscription"
     };
+
+    /* ---- Make ping (checkout.submit) ---- */
+    // Build a small, stable payload for Make. This does not affect Stripe flow.
+    const checkoutSubmit = {
+      schema_version: "v1",
+      event: "checkout.submit",
+      meta: {
+        lead_id: leadId,
+        pay_mode_choice: mode,
+      },
+      company: {
+        plan_id: planId,
+        months,
+        price_month: PRICE_MONTH_BY_PLAN[planId] ?? null,
+        total_price: UPFRONT_PRICE_TABLE[planId]?.unit_amount
+          ? Math.round(UPFRONT_PRICE_TABLE[planId].unit_amount / 100)
+          : null,
+      },
+      options: {
+        mail_enabled: mailEnabled ? 1 : 0,
+        mail_plan: mailPlan || "",
+        want_gestoria: wantGestoria ? 1 : 0,
+      },
+      customer_email: email || "",
+    };
+    // Fire and forget (await for ordering/logging)
+    await sendCheckoutSubmitToMake(checkoutSubmit);
 
     /* ───── A) Subscription (monthly auto-charge) ───── */
     if (mode === "subscription") {
