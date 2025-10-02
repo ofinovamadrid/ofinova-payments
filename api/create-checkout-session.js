@@ -1,7 +1,8 @@
 // api/create-checkout-session.js
-// 2025-09 | v2.2
-// - Add: fire-and-forget POST to Make (checkout.submit) as urlencoded `value=`
-// - Keep CORS hardening + wildcard support
+// 2025-10 | v2.3
+// - Add: include `shipping.address` and `shipping.notes` in fire-and-forget POST to Make
+// - Keep: pay_mode_choice / want_gestoria reporting
+// - CORS hardening + wildcard
 // - Supports one-off (payment) and monthly (subscription)
 
 import Stripe from "stripe";
@@ -129,15 +130,10 @@ const MAKE_CHECKOUT_WEBHOOK_URL = process.env.MAKE_CHECKOUT_WEBHOOK_URL || "";
 function postToMake(payload) {
   if (!MAKE_CHECKOUT_WEBHOOK_URL) return;
   try {
-    // Make이 기대하는 포맷: application/x-www-form-urlencoded, key = "value"
-    const form = new URLSearchParams();
-    form.set("value", JSON.stringify(payload));
-
-    // fire-and-forget (체크아웃 흐름을 막지 않음)
     fetch(MAKE_CHECKOUT_WEBHOOK_URL, {
       method: "POST",
-      headers: { "Content-Type": "application/x-www-form-urlencoded" },
-      body: form.toString(),
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
     }).catch(() => {});
   } catch {
     // swallow
@@ -156,7 +152,8 @@ export default async function handler(req, res) {
       return res.status(400).json({ error: "Invalid planId" });
     }
 
-    const months = toInt(metadata.months, PLAN_MONTHS[planId]) || PLAN_MONTHS[planId];
+    const months =
+      toInt(metadata.months, PLAN_MONTHS[planId]) || PLAN_MONTHS[planId];
 
     const leadId = String(
       metadata.lead_id ?? metadata.leadId ?? metadata.orderId ?? ""
@@ -175,6 +172,20 @@ export default async function handler(req, res) {
       toBool(metadata.want_gestoria) || toBool(metadata.wantGestoria) || false;
 
     const mode = (payMode || metadata.payMode || "payment").toLowerCase();
+
+    // shipping may arrive as object or JSON string (because of Stripe metadata stringify)
+    let shippingAddress = "";
+    let shippingNotes = "";
+    try {
+      const shippingRaw = (metadata.shipping && typeof metadata.shipping === "string")
+        ? JSON.parse(metadata.shipping)
+        : (metadata.shipping || {});
+      shippingAddress = String(shippingRaw.address || metadata.address || "").trim();
+      shippingNotes   = String(shippingRaw.notes   || metadata.notes   || "").trim();
+    } catch {
+      shippingAddress = String(metadata.address || "").trim();
+      shippingNotes   = String(metadata.notes   || "").trim();
+    }
 
     const sessMeta = {
       ...metadata,
@@ -211,6 +222,10 @@ export default async function handler(req, res) {
         mail_enabled: mailEnabled ? 1 : 0,
         mail_plan: mailPlan || "none",
         want_gestoria: wantGestoria ? 1 : 0,
+      },
+      shipping: {
+        address: shippingAddress,
+        notes: shippingNotes,
       },
       customer_email: email || "",
     });
