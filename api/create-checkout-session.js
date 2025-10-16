@@ -1,8 +1,8 @@
 // api/create-checkout-session.js
-// 2025-10 | v2.8
-// - Fix: Make webhook body shape -> { value: JSON.stringify(payload) } to satisfy JSON module
-// - Keep: robust shipping extraction + fire-and-forget POST to Make
-// - Supports one-off (payment) and monthly (subscription)
+// 2025-10 | v2.9 (hotfix-company-fields)
+// - Add: Forward company_legal_name & company_cif_nif to Make checkout.submit payload
+// - Add: Normalize & persist company_legal_name & company_cif_nif into Stripe metadata
+// - Keep: { value: JSON.stringify(payload) } body shape for Make JSON module
 
 import Stripe from "stripe";
 
@@ -75,7 +75,7 @@ function matchWildcard(pattern, origin) {
   try {
     const u = new URL(origin);
     const hostPattern = pattern.split("://")[1];
-    const re = new RegExp("^" + hostPattern.replace(/\./g, "\\.").replace(/\*/g, ".*") + "$");
+    const re = new RegExp("^" + hostPattern.replace(/\\./g, "\\\\.").replace(/\\*/g, ".*") + "$");
     const patternProto = pattern.split("://")[0];
     return u.protocol.replace(":", "") === patternProto && re.test(u.host);
   } catch {
@@ -163,6 +163,16 @@ export default async function handler(req, res) {
       return res.status(400).json({ error: "Missing lead_id/orderId in metadata" });
     }
 
+    // NEW — normalize company fields from metadata
+    const companyLegalName = firstNonEmpty(
+      metadata.company_legal_name,
+      metadata.companyLegalName
+    );
+    const companyCifNif = firstNonEmpty(
+      metadata.company_cif_nif,
+      metadata.companyCifNif
+    );
+
     const mailEnabled = toBool(metadata.mailEnabled) || toBool(metadata.mail_enabled) || false;
     const mailPlan = normMailPlan(metadata.mail ?? metadata.mail_plan ?? metadata.mailPlan ?? "");
 
@@ -214,6 +224,7 @@ export default async function handler(req, res) {
       metadata.shipping_notes
     );
 
+    // Build metadata for Stripe (string-only)
     const sessMeta = {
       ...metadata,
       lead_id: leadId,
@@ -224,12 +235,15 @@ export default async function handler(req, res) {
       mailPlan: mailPlan || "",
       want_gestoria: String(wantGestoria ? 1 : 0),
       mode,
+      // persist normalized company fields
+      company_legal_name: companyLegalName || "",
+      company_cif_nif: companyCifNif || "",
       // Keep in Stripe metadata for traceability
       shipping_address: shippingAddress || "",
       shipping_notes: shippingNotes || "",
     };
 
-    // fire-and-forget → Make
+    // fire-and-forget → Make (INCLUDE company fields)
     postToMake({
       schema_version: "v1",
       event: "checkout.submit",
@@ -257,6 +271,9 @@ export default async function handler(req, res) {
         address: shippingAddress,
         notes: shippingNotes,
       },
+      // NEW — forward these so Make Webhooks → JSON(2) can map them
+      company_legal_name: companyLegalName || "",
+      company_cif_nif: companyCifNif || "",
       customer_email: email || "",
     });
 
