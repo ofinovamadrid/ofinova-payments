@@ -1,8 +1,9 @@
 // api/create-checkout-session.js
-// 2025-10 | v2.9 (hotfix-company-fields)
-// - Add: Forward company_legal_name & company_cif_nif to Make checkout.submit payload
-// - Add: Normalize & persist company_legal_name & company_cif_nif into Stripe metadata
+// 2025-11 | v3.0 (annual-14eur-fix)
+// - Change: Update upfront (prepago) amounts to 14€/mes for all durations
+// - Change: Report correct monthly prices to Make (14€/mes prepago, 20€/mes suscripción)
 // - Keep: { value: JSON.stringify(payload) } body shape for Make JSON module
+// - Keep: company_legal_name & company_cif_nif forwarding to Make + Stripe metadata
 
 import Stripe from "stripe";
 
@@ -21,8 +22,9 @@ const TAX_RATE_ID =
 /** Landing ‘planId’ → months */
 const PLAN_MONTHS = { p3: 3, p6: 6, p12: 12, p24: 24 };
 
-/** Monthly price (for reporting to Make) */
-const PRICE_MONTH_BY_PLAN = { p3: 23, p6: 20, p12: 17, p24: 14 };
+/** Monthly prices used only for reporting to Make (NOT for charging) */
+const MONTHLY_UPFRONT_PRICE_EUR = 14; // prepago: 14€/mes
+const MONTHLY_SUBSCRIPTION_PRICE_EUR = 20; // suscripción: 20€/mes
 
 /** Address monthly Prices (Stripe Price IDs) — subscription only */
 const PRICE_DOMI_BY_PLAN = {
@@ -38,11 +40,18 @@ const PRICE_MAIL = {
   pro: process.env.STRIPE_PRICE_MAIL_PRO_990,
 };
 
-/** One-off (upfront) net amounts (without VAT), in cents */
+/**
+ * One-off (upfront) net amounts (without VAT), in cents.
+ * New rule (2025-11): all prepago plans use 14€/mes.
+ *  - 3 meses  ->  42€  ->  4200
+ *  - 6 meses  ->  84€  ->  8400
+ *  - 12 meses -> 168€  -> 16800
+ *  - 24 meses -> 336€  -> 33600
+ */
 const UPFRONT_PRICE_TABLE = {
-  p3:  { name: "Ofinova Domiciliación – 3 meses",  unit_amount: 6900  },
-  p6:  { name: "Ofinova Domiciliación – 6 meses",  unit_amount: 12000 },
-  p12: { name: "Ofinova Domiciliación – 12 meses", unit_amount: 20400 },
+  p3:  { name: "Ofinova Domiciliación – 3 meses",  unit_amount:  4200 },
+  p6:  { name: "Ofinova Domiciliación – 6 meses",  unit_amount:  8400 },
+  p12: { name: "Ofinova Domiciliación – 12 meses", unit_amount: 16800 },
   p24: { name: "Ofinova Domiciliación – 24 meses", unit_amount: 33600 },
 };
 
@@ -75,7 +84,7 @@ function matchWildcard(pattern, origin) {
   try {
     const u = new URL(origin);
     const hostPattern = pattern.split("://")[1];
-    const re = new RegExp("^" + hostPattern.replace(/\\./g, "\\\\.").replace(/\\*/g, ".*") + "$");
+    const re = new RegExp("^" + hostPattern.replace(/\./g, "\\.").replace(/\*/g, ".*") + "$");
     const patternProto = pattern.split("://")[0];
     return u.protocol.replace(":", "") === patternProto && re.test(u.host);
   } catch {
@@ -95,7 +104,7 @@ function applyCors(req, res) {
   }
   res.setHeader("Vary", "Origin");
   res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type", "Authorization");
   res.setHeader("Access-Control-Max-Age", "86400");
 }
 
@@ -243,6 +252,23 @@ export default async function handler(req, res) {
       shipping_notes: shippingNotes || "",
     };
 
+    // Pre-calc reporting amounts for Make
+    const upfrontConfig = UPFRONT_PRICE_TABLE[planId];
+    const totalUpfrontEur =
+      upfrontConfig && typeof upfrontConfig.unit_amount === "number"
+        ? Math.round(upfrontConfig.unit_amount / 100)
+        : null;
+
+    const monthlyPriceEur =
+      mode === "subscription"
+        ? MONTHLY_SUBSCRIPTION_PRICE_EUR
+        : MONTHLY_UPFRONT_PRICE_EUR;
+
+    const totalContractPriceEur =
+      mode === "subscription"
+        ? months * MONTHLY_SUBSCRIPTION_PRICE_EUR
+        : totalUpfrontEur;
+
     // fire-and-forget → Make (INCLUDE company fields)
     postToMake({
       schema_version: "v1",
@@ -257,10 +283,8 @@ export default async function handler(req, res) {
       company: {
         plan_id: planId,
         months,
-        price_month: PRICE_MONTH_BY_PLAN[planId] ?? null,
-        total_price: UPFRONT_PRICE_TABLE[planId]?.unit_amount
-          ? Math.round(UPFRONT_PRICE_TABLE[planId].unit_amount / 100)
-          : null,
+        price_month: monthlyPriceEur,
+        total_price: totalContractPriceEur,
       },
       options: {
         mail_enabled: mailEnabled ? 1 : 0,
