@@ -1,9 +1,7 @@
 // api/create-checkout-session.js
-// 2025-11 | v3.0 (annual-14eur-fix)
-// - Change: Update upfront (prepago) amounts to 14€/mes for all durations
-// - Change: Report correct monthly prices to Make (14€/mes prepago, 20€/mes suscripción)
-// - Keep: { value: JSON.stringify(payload) } body shape for Make JSON module
-// - Keep: company_legal_name & company_cif_nif forwarding to Make + Stripe metadata
+// 2025-11 | v3.1 (industry-forward-to-make)
+// - Add: Forward 'industry' (Actividad/sector) into Make payload + Stripe metadata (NO other behavior changes)
+// - Keep: Pricing / existing fields / Make body shape { value: JSON.stringify(payload) } unchanged
 
 import Stripe from "stripe";
 
@@ -129,6 +127,10 @@ function normMailPlan(s) {
   if (t === "lite" || t === "pro") return t;
   return "";
 }
+function normIndustry(s) {
+  const t = String(s ?? "").trim();
+  return t;
+}
 const firstNonEmpty = (...vals) => {
   for (const v of vals) {
     const s = typeof v === "string" ? v : (v == null ? "" : String(v));
@@ -187,6 +189,24 @@ export default async function handler(req, res) {
 
     const wantGestoria =
       toBool(metadata.want_gestoria) || toBool(metadata.wantGestoria) || false;
+
+    // NEW — industry/sector (Actividad)
+    const industry = normIndustry(
+      firstNonEmpty(
+        // common names from frontend
+        metadata.industry,
+        metadata.sector,
+        metadata.actividad,
+        metadata.actividad_sector,
+        metadata.activity_sector,
+        // some frontends might send it top-level (rare)
+        req.body?.industry,
+        req.body?.sector,
+        req.body?.actividad,
+        req.body?.actividad_sector,
+        req.body?.activity_sector
+      )
+    );
 
     const mode = (payMode || metadata.payMode || "payment").toLowerCase();
 
@@ -247,6 +267,8 @@ export default async function handler(req, res) {
       // persist normalized company fields
       company_legal_name: companyLegalName || "",
       company_cif_nif: companyCifNif || "",
+      // NEW — keep industry in Stripe metadata too
+      industry: industry || "",
       // Keep in Stripe metadata for traceability
       shipping_address: shippingAddress || "",
       shipping_notes: shippingNotes || "",
@@ -290,6 +312,8 @@ export default async function handler(req, res) {
         mail_enabled: mailEnabled ? 1 : 0,
         mail_plan: mailPlan || "none",
         want_gestoria: wantGestoria ? 1 : 0,
+        // NEW — industry forwarded for Airtable actividad_sector mapping
+        industry: industry || "",
       },
       shipping: {
         address: shippingAddress,
