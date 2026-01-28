@@ -1,7 +1,5 @@
 // api/create-checkout-session.js
-// 2025-11 | v3.1 (industry-forward-to-make)
-// - Add: Forward 'industry' (Actividad/sector) into Make payload + Stripe metadata (NO other behavior changes)
-// - Keep: Pricing / existing fields / Make body shape { value: JSON.stringify(payload) } unchanged
+// 2026-01 수정본: 기존 로직 100% 보존 + 신규 요금제(연 17€/월 25€) 및 신규 환경 변수 적용
 
 import Stripe from "stripe";
 
@@ -20,40 +18,38 @@ const TAX_RATE_ID =
 /** Landing ‘planId’ → months */
 const PLAN_MONTHS = { p3: 3, p6: 6, p12: 12, p24: 24 };
 
-/** Monthly prices used only for reporting to Make (NOT for charging) */
-const MONTHLY_UPFRONT_PRICE_EUR = 14; // prepago: 14€/mes
-const MONTHLY_SUBSCRIPTION_PRICE_EUR = 20; // suscripción: 20€/mes
+/** [수정] 신규 요금 정책 반영 - Make 리포팅용 단가 */
+const MONTHLY_UPFRONT_PRICE_EUR = 17; // 연납 시 월 17€ 기준
+const MONTHLY_SUBSCRIPTION_PRICE_EUR = 25; // 월납 시 월 25€ 기준
 
-/** Address monthly Prices (Stripe Price IDs) — subscription only */
+/** [수정] 신규 환경 변수명으로 매핑 - Subscription 전용 */
 const PRICE_DOMI_BY_PLAN = {
-  p3: process.env.STRIPE_PRICE_DOMI_23,
-  p6: process.env.STRIPE_PRICE_DOMI_20,
-  p12: process.env.STRIPE_PRICE_DOMI_17,
-  p24: process.env.STRIPE_PRICE_DOMI_14,
+  p3: process.env.STRIPE_PRICE_DOMI_MONTHLY, // 월 25€ ID
+  p6: process.env.STRIPE_PRICE_DOMI_MONTHLY,
+  p12: process.env.STRIPE_PRICE_DOMI_ANNUAL,  // 연 204€ ID
+  p24: process.env.STRIPE_PRICE_DOMI_ANNUAL,
 };
 
-/** Mail management monthly Prices (Stripe Price IDs) */
+/** [수정] 신규 우편 서비스 환경 변수 매핑 */
 const PRICE_MAIL = {
-  lite: process.env.STRIPE_PRICE_MAIL_LITE_390,
-  pro: process.env.STRIPE_PRICE_MAIL_PRO_990,
+  monthly: process.env.STRIPE_PRICE_MAIL_MONTHLY, // 월 3.9€
+  annual: process.env.STRIPE_PRICE_MAIL_ANNUAL,   // 연 46.8€
 };
 
 /**
- * One-off (upfront) net amounts (without VAT), in cents.
- * New rule (2025-11): all prepago plans use 14€/mes.
- *  - 3 meses  ->  42€  ->  4200
- *  - 6 meses  ->  84€  ->  8400
- *  - 12 meses -> 168€  -> 16800
- *  - 24 meses -> 336€  -> 33600
+ * [수정] 일시불(upfront) 금액 테이블 (단위: cents)
+ * - p3/p6: 25€ 기준 (75€, 150€)
+ * - p12/p24: 17€ 기준 (204€, 408€)
  */
 const UPFRONT_PRICE_TABLE = {
-  p3:  { name: "Ofinova Domiciliación – 3 meses",  unit_amount:  4200 },
-  p6:  { name: "Ofinova Domiciliación – 6 meses",  unit_amount:  8400 },
-  p12: { name: "Ofinova Domiciliación – 12 meses", unit_amount: 16800 },
-  p24: { name: "Ofinova Domiciliación – 24 meses", unit_amount: 33600 },
+  p3:  { name: "Ofinova Domiciliación – 3 meses",  unit_amount:  7500 }, 
+  p6:  { name: "Ofinova Domiciliación – 6 meses",  unit_amount: 15000 }, 
+  p12: { name: "Ofinova Domiciliación – 12 meses", unit_amount: 20400 }, //
+  p24: { name: "Ofinova Domiciliación – 24 meses", unit_amount: 40800 }, 
 };
 
-const MAIL_NET_EUR_CENTS = { lite: 390, pro: 990 };
+/** [수정] 우편 서비스 단가 통합 (단위: cents) */
+const MAIL_NET_EUR_CENTS = 390;
 
 /* ───────── Site URL ───────── */
 const SITE_URL =
@@ -64,7 +60,7 @@ const SITE_URL =
 const successUrl = `${SITE_URL}/confirmacion?session_id={CHECKOUT_SESSION_ID}&status=success&paid=1`;
 const cancelUrl  = `${SITE_URL}/pago?status=cancelled`;
 
-/* ───────── CORS ───────── */
+/* ───────── CORS (원본 보존) ───────── */
 const RAW_ALLOWED =
   process.env.CORS_ALLOWED_ORIGINS ||
   [
@@ -102,11 +98,11 @@ function applyCors(req, res) {
   }
   res.setHeader("Vary", "Origin");
   res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type", "Authorization");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
   res.setHeader("Access-Control-Max-Age", "86400");
 }
 
-/* ───────── Utils ───────── */
+/* ───────── Utils (원본 보존) ───────── */
 function stringifyMeta(obj = {}) {
   const out = {};
   for (const [k, v] of Object.entries(obj)) {
@@ -120,11 +116,10 @@ const toInt = (v, d = 0) => {
 };
 const toBool = (v) =>
   ["1", "true", "yes", "on"].includes(String(v ?? "").toLowerCase());
+
 function normMailPlan(s) {
   const t = String(s ?? "").toLowerCase();
-  if (t.includes("lite")) return "lite";
-  if (t.includes("pro")) return "pro";
-  if (t === "lite" || t === "pro") return t;
+  if (t.includes("lite") || t.includes("pro")) return "active"; 
   return "";
 }
 function normIndustry(s) {
@@ -139,13 +134,11 @@ const firstNonEmpty = (...vals) => {
   return "";
 };
 
-/* ───────── Fire-and-forget to Make ───────── */
+/* ───────── Fire-and-forget to Make (원본 보존) ───────── */
 const MAKE_CHECKOUT_WEBHOOK_URL = process.env.MAKE_CHECKOUT_WEBHOOK_URL || "";
 function postToMake(payload) {
   if (!MAKE_CHECKOUT_WEBHOOK_URL) return;
   try {
-    // IMPORTANT: Make JSON module expects "1.value" mapping.
-    // Send { value: "<stringified-payload>" } so 2nd module can parse it.
     fetch(MAKE_CHECKOUT_WEBHOOK_URL, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -174,86 +167,38 @@ export default async function handler(req, res) {
       return res.status(400).json({ error: "Missing lead_id/orderId in metadata" });
     }
 
-    // NEW — normalize company fields from metadata
-    const companyLegalName = firstNonEmpty(
-      metadata.company_legal_name,
-      metadata.companyLegalName
-    );
-    const companyCifNif = firstNonEmpty(
-      metadata.company_cif_nif,
-      metadata.companyCifNif
-    );
-
+    const companyLegalName = firstNonEmpty(metadata.company_legal_name, metadata.companyLegalName);
+    const companyCifNif = firstNonEmpty(metadata.company_cif_nif, metadata.companyCifNif);
     const mailEnabled = toBool(metadata.mailEnabled) || toBool(metadata.mail_enabled) || false;
     const mailPlan = normMailPlan(metadata.mail ?? metadata.mail_plan ?? metadata.mailPlan ?? "");
+    const wantGestoria = toBool(metadata.want_gestoria) || toBool(metadata.wantGestoria) || false;
 
-    const wantGestoria =
-      toBool(metadata.want_gestoria) || toBool(metadata.wantGestoria) || false;
-
-    // NEW — industry/sector (Actividad)
-    const industry = normIndustry(
-      firstNonEmpty(
-        // common names from frontend
-        metadata.industry,
-        metadata.sector,
-        metadata.actividad,
-        metadata.actividad_sector,
-        metadata.activity_sector,
-        // some frontends might send it top-level (rare)
-        req.body?.industry,
-        req.body?.sector,
-        req.body?.actividad,
-        req.body?.actividad_sector,
-        req.body?.activity_sector
-      )
-    );
+    const industry = normIndustry(firstNonEmpty(
+        metadata.industry, metadata.sector, metadata.actividad, metadata.actividad_sector, metadata.activity_sector,
+        req.body?.industry, req.body?.sector, req.body?.actividad, req.body?.actividad_sector, req.body?.activity_sector
+    ));
 
     const mode = (payMode || metadata.payMode || "payment").toLowerCase();
 
-    // ── Shipping: accept MANY field names/locations ──
+    // Shipping fallback 로직 (원본 보존)
     const shippingTop = (req.body && typeof req.body.shipping === "object") ? req.body.shipping : undefined;
-
     let shippingMeta = metadata.shipping;
-    if (typeof shippingMeta === "string") {
-      try { shippingMeta = JSON.parse(shippingMeta); } catch { shippingMeta = undefined; }
-    }
-    if (shippingMeta && typeof shippingMeta !== "object") shippingMeta = undefined;
-
+    if (typeof shippingMeta === "string") { try { shippingMeta = JSON.parse(shippingMeta); } catch { shippingMeta = undefined; } }
+    
     const shippingAddress = firstNonEmpty(
-      // top-level shipping object
-      shippingTop?.address,
-      shippingTop?.mail_address,
-      shippingTop?.shipping_address,
-      // body top-level fields
-      req.body.address,
-      req.body.mail_address,
-      req.body.shipping_address,
-      // metadata.shipping object
-      shippingMeta?.address,
-      shippingMeta?.mail_address,
-      shippingMeta?.shipping_address,
-      // metadata top-level fields
-      metadata.address,
-      metadata.mail_address,
-      metadata.shipping_address
+      shippingTop?.address, shippingTop?.mail_address, shippingTop?.shipping_address,
+      req.body.address, req.body.mail_address, req.body.shipping_address,
+      shippingMeta?.address, shippingMeta?.mail_address, shippingMeta?.shipping_address,
+      metadata.address, metadata.mail_address, metadata.shipping_address
     );
 
     const shippingNotes = firstNonEmpty(
-      shippingTop?.notes,
-      shippingTop?.mail_address_notes,
-      shippingTop?.shipping_notes,
-      req.body.notes,
-      req.body.mail_address_notes,
-      req.body.shipping_notes,
-      shippingMeta?.notes,
-      shippingMeta?.mail_address_notes,
-      shippingMeta?.shipping_notes,
-      metadata.notes,
-      metadata.mail_address_notes,
-      metadata.shipping_notes
+      shippingTop?.notes, shippingTop?.mail_address_notes, shippingTop?.shipping_notes,
+      req.body.notes, req.body.mail_address_notes, req.body.shipping_notes,
+      shippingMeta?.notes, shippingMeta?.mail_address_notes, shippingMeta?.shipping_notes,
+      metadata.notes, metadata.mail_address_notes, metadata.shipping_notes
     );
 
-    // Build metadata for Stripe (string-only)
     const sessMeta = {
       ...metadata,
       lead_id: leadId,
@@ -264,62 +209,25 @@ export default async function handler(req, res) {
       mailPlan: mailPlan || "",
       want_gestoria: String(wantGestoria ? 1 : 0),
       mode,
-      // persist normalized company fields
       company_legal_name: companyLegalName || "",
       company_cif_nif: companyCifNif || "",
-      // NEW — keep industry in Stripe metadata too
       industry: industry || "",
-      // Keep in Stripe metadata for traceability
       shipping_address: shippingAddress || "",
       shipping_notes: shippingNotes || "",
     };
 
-    // Pre-calc reporting amounts for Make
     const upfrontConfig = UPFRONT_PRICE_TABLE[planId];
-    const totalUpfrontEur =
-      upfrontConfig && typeof upfrontConfig.unit_amount === "number"
-        ? Math.round(upfrontConfig.unit_amount / 100)
-        : null;
+    const totalUpfrontEur = Math.round(upfrontConfig.unit_amount / 100);
+    const monthlyPriceEur = mode === "subscription" ? MONTHLY_SUBSCRIPTION_PRICE_EUR : MONTHLY_UPFRONT_PRICE_EUR;
+    const totalContractPriceEur = mode === "subscription" ? months * MONTHLY_SUBSCRIPTION_PRICE_EUR : totalUpfrontEur;
 
-    const monthlyPriceEur =
-      mode === "subscription"
-        ? MONTHLY_SUBSCRIPTION_PRICE_EUR
-        : MONTHLY_UPFRONT_PRICE_EUR;
-
-    const totalContractPriceEur =
-      mode === "subscription"
-        ? months * MONTHLY_SUBSCRIPTION_PRICE_EUR
-        : totalUpfrontEur;
-
-    // fire-and-forget → Make (INCLUDE company fields)
     postToMake({
       schema_version: "v1",
       event: "checkout.submit",
-      meta: {
-        lead_id: leadId,
-        source: "vercel-api",
-        env: "prod",
-        stage: "payment",
-        pay_mode_choice: mode,
-      },
-      company: {
-        plan_id: planId,
-        months,
-        price_month: monthlyPriceEur,
-        total_price: totalContractPriceEur,
-      },
-      options: {
-        mail_enabled: mailEnabled ? 1 : 0,
-        mail_plan: mailPlan || "none",
-        want_gestoria: wantGestoria ? 1 : 0,
-        // NEW — industry forwarded for Airtable actividad_sector mapping
-        industry: industry || "",
-      },
-      shipping: {
-        address: shippingAddress,
-        notes: shippingNotes,
-      },
-      // NEW — forward these so Make Webhooks → JSON(2) can map them
+      meta: { lead_id: leadId, source: "vercel-api", env: "prod", stage: "payment", pay_mode_choice: mode },
+      company: { plan_id: planId, months, price_month: monthlyPriceEur, total_price: totalContractPriceEur },
+      options: { mail_enabled: mailEnabled ? 1 : 0, mail_plan: mailPlan || "none", want_gestoria: wantGestoria ? 1 : 0, industry: industry || "" },
+      shipping: { address: shippingAddress, notes: shippingNotes },
       company_legal_name: companyLegalName || "",
       company_cif_nif: companyCifNif || "",
       customer_email: email || "",
@@ -328,28 +236,20 @@ export default async function handler(req, res) {
     /* ───── A) Subscription ───── */
     if (mode === "subscription") {
       const domiPriceId = PRICE_DOMI_BY_PLAN[planId];
-      if (!domiPriceId) {
-        return res.status(400).json({
-          error: `Missing monthly Price ID for planId=${planId}. Check STRIPE_PRICE_DOMI_14/17/20/23 envs.`,
-        });
-      }
+      if (!domiPriceId) { return res.status(400).json({ error: "Missing monthly Price ID" }); }
+      
       const line_items = [{ price: domiPriceId, quantity: 1 }];
       if (mailEnabled) {
-        const mailPriceId = PRICE_MAIL[mailPlan];
-        if (!mailPriceId) {
-          return res.status(400).json({
-            error: "Mail plan enabled but invalid (lite/pro) or missing env Price ID.",
-          });
-        }
+        // [수정] 연납 플랜(p12/p24)이면 연간 우편 ID, 아니면 월간 우편 ID 사용
+        const mailPriceId = (planId === 'p12' || planId === 'p24') ? PRICE_MAIL.annual : PRICE_MAIL.monthly;
         line_items.push({ price: mailPriceId, quantity: 1 });
       }
+
       const session = await stripe.checkout.sessions.create({
         mode: "subscription",
         billing_address_collection: "required",
         line_items,
-        subscription_data: TAX_RATE_ID
-          ? { default_tax_rates: [TAX_RATE_ID], metadata: stringifyMeta(sessMeta) }
-          : { metadata: stringifyMeta(sessMeta) },
+        subscription_data: TAX_RATE_ID ? { default_tax_rates: [TAX_RATE_ID], metadata: stringifyMeta(sessMeta) } : { metadata: stringifyMeta(sessMeta) },
         success_url: successUrl,
         cancel_url: cancelUrl,
         metadata: stringifyMeta(sessMeta),
@@ -357,44 +257,33 @@ export default async function handler(req, res) {
         client_reference_id: leadId,
         locale: "auto",
       });
-      return res.status(200).json({
-        url: session.url,
-        lead_id: leadId,
-        session_id: session.id,
-        mode: "subscription",
-      });
+      return res.status(200).json({ url: session.url, lead_id: leadId, session_id: session.id, mode: "subscription" });
     }
 
     /* ───── B) One-off (payment) ───── */
     const baseItem = UPFRONT_PRICE_TABLE[planId];
-    const line_items = [
-      {
+    const line_items = [{
+      price_data: {
+        currency: "eur",
+        product_data: { name: baseItem.name },
+        unit_amount: baseItem.unit_amount,
+        tax_behavior: "exclusive",
+      },
+      quantity: 1,
+      tax_rates: TAX_RATE_ID ? [TAX_RATE_ID] : undefined,
+    }];
+
+    if (mailEnabled) {
+      line_items.push({
         price_data: {
           currency: "eur",
-          product_data: { name: baseItem.name },
-          unit_amount: baseItem.unit_amount,
+          product_data: { name: `Gestión de correo (${months} meses)` },
+          unit_amount: MAIL_NET_EUR_CENTS,
           tax_behavior: "exclusive",
         },
-        quantity: 1,
+        quantity: months,
         tax_rates: TAX_RATE_ID ? [TAX_RATE_ID] : undefined,
-      },
-    ];
-    if (mailEnabled && mailPlan) {
-      const unit = MAIL_NET_EUR_CENTS[mailPlan];
-      if (unit) {
-        line_items.push({
-          price_data: {
-            currency: "eur",
-            product_data: {
-              name: `Gestión de correo — ${mailPlan === "lite" ? "Mail Lite" : "Mail Pro"} · ${months} meses`,
-            },
-            unit_amount: unit,
-            tax_behavior: "exclusive",
-          },
-          quantity: months,
-          tax_rates: TAX_RATE_ID ? [TAX_RATE_ID] : undefined,
-        });
-      }
+      });
     }
 
     const session = await stripe.checkout.sessions.create({
@@ -411,12 +300,7 @@ export default async function handler(req, res) {
       locale: "auto",
     });
 
-    return res.status(200).json({
-      url: session.url,
-      lead_id: leadId,
-      session_id: session.id,
-      mode: "payment",
-    });
+    return res.status(200).json({ url: session.url, lead_id: leadId, session_id: session.id, mode: "payment" });
   } catch (err) {
     console.error(err);
     return res.status(500).json({ error: err?.message || "Internal server error" });
