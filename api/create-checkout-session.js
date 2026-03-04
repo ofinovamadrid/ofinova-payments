@@ -1,5 +1,5 @@
 // api/create-checkout-session.js
-// 2026-01 수정본: 기존 로직 100% 보존 + 구독 자동 종료(cancel_at) 기능 추가
+// 2026-03 수정본: Stripe 파라미터 충돌 오류 수정 (cancel_at 제거)
 
 import Stripe from "stripe";
 
@@ -168,10 +168,6 @@ export default async function handler(req, res) {
         line_items.push({ price: mailPriceId, quantity: 1 });
       }
 
-      // [수정 핵심] 동혁님의 의도대로 개월 수에 맞춰 구독이 자동 종료되도록 설정
-      // 날짜 계산: 현재 시간 + (선택한 개월 수 * 30일)
-      const cancelAtTimestamp = Math.floor(Date.now() / 1000) + (months * 30 * 24 * 60 * 60);
-
       const session = await stripe.checkout.sessions.create({
         mode: "subscription",
         billing_address_collection: "required",
@@ -179,8 +175,7 @@ export default async function handler(req, res) {
         subscription_data: {
           default_tax_rates: TAX_RATE_ID ? [TAX_RATE_ID] : undefined,
           metadata: stringifyMeta(sessMeta),
-          // 연납 플랜(p12, p24)이 아닌 경우에만 개월 수에 맞춰 자동 종료 예약
-          cancel_at: (planId !== 'p12' && planId !== 'p24') ? cancelAtTimestamp : undefined,
+          // Se elimina cancel_at para evitar el error de parámetro desconocido en Stripe Checkout
         },
         success_url: successUrl,
         cancel_url: cancelUrl,
