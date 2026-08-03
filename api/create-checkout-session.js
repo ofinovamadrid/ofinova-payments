@@ -1,5 +1,9 @@
 // api/create-checkout-session.js
-// 2026-03 수정본: Stripe 파라미터 충돌 오류 수정 (cancel_at 제거)
+// 2026-08 수정본: 할인코드(Promotion Code) 지원 추가
+// - promoCode를 받아 Stripe에서 재검증 후, 유효할 때만 세션에 discounts로 반영
+// - 프론트에서 온 percent_off 값은 신뢰하지 않고, 여기서 다시 Stripe API로 확인함
+// - 일시불(payment) / 구독(subscription) 두 모드 모두 지원
+// - sessMeta에 promo_code 필드 추가 -> Make 웹훅 -> Airtable까지 자동으로 기록됨
 
 import Stripe from "stripe";
 
@@ -112,13 +116,40 @@ function postToMake(payload) {
   } catch {}
 }
 
+// ── 할인코드 재검증 (프론트에서 온 값을 그대로 믿지 않고 Stripe에 다시 물어봄) ──
+async function resolvePromotionCode(rawCode) {
+  const cleanCode = String(rawCode || "").trim().toUpperCase();
+  if (!cleanCode) return null;
+
+  try {
+    const list = await stripe.promotionCodes.list({
+      code: cleanCode,
+      active: true,
+      limit: 1,
+    });
+    const promo = list.data[0];
+    if (!promo) return null;
+    if (!promo.coupon || promo.coupon.valid === false) return null;
+    if (promo.max_redemptions && promo.times_redeemed >= promo.max_redemptions) return null;
+
+    return {
+      id: promo.id,
+      code: cleanCode,
+      percent_off: promo.coupon.percent_off || 0,
+    };
+  } catch (err) {
+    console.error("[resolvePromotionCode] error:", err);
+    return null;
+  }
+}
+
 export default async function handler(req, res) {
   applyCors(req, res);
   if (req.method === "OPTIONS") return res.status(200).end();
   if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
 
   try {
-    const { planId, email, payMode, metadata = {} } = req.body || {};
+    const { planId, email, payMode, promoCode, metadata = {} } = req.body || {};
     if (!planId || !UPFRONT_PRICE_TABLE[planId]) return res.status(400).json({ error: "Invalid planId" });
 
     const months = toInt(metadata.months, PLAN_MONTHS[planId]) || PLAN_MONTHS[planId];
@@ -137,11 +168,17 @@ export default async function handler(req, res) {
     const shippingAddress = firstNonEmpty(shippingTop?.address, req.body.address, metadata.address);
     const shippingNotes = firstNonEmpty(shippingTop?.notes, req.body.notes, metadata.notes);
 
+    // ── 할인코드 재검증 (있으면) ──
+    const promo = await resolvePromotionCode(promoCode || metadata.promoCode || metadata.promo_code);
+
     const sessMeta = {
       ...metadata, lead_id: leadId, orderId: leadId, planId, months, mailEnabled: String(mailEnabled ? 1 : 0),
       mailPlan: mailPlan || "", want_gestoria: String(wantGestoria ? 1 : 0), mode,
       company_legal_name: companyLegalName || "", company_cif_nif: companyCifNif || "",
       industry: industry || "", shipping_address: shippingAddress || "", shipping_notes: shippingNotes || "",
+      promo_code: promo ? promo.code : "",
+      promo_applied: promo ? "1" : "0",
+      promo_percent_off: promo ? String(promo.percent_off) : "0",
     };
 
     const upfrontConfig = UPFRONT_PRICE_TABLE[planId];
@@ -155,6 +192,8 @@ export default async function handler(req, res) {
       options: { mail_enabled: mailEnabled ? 1 : 0, mail_plan: mailPlan || "none", want_gestoria: wantGestoria ? 1 : 0, industry: industry || "" },
       shipping: { address: shippingAddress, notes: shippingNotes },
       company_legal_name: companyLegalName || "", company_cif_nif: companyCifNif || "", customer_email: email || "",
+      promo_code: promo ? promo.code : "",
+      promo_applied: promo ? 1 : 0,
     });
 
     /* ───── A) Subscription Mode ───── */
@@ -175,6 +214,7 @@ export default async function handler(req, res) {
         subscription_data: {
           default_tax_rates: TAX_RATE_ID ? [TAX_RATE_ID] : undefined,
           metadata: stringifyMeta(sessMeta),
+          discounts: promo ? [{ promotion_code: promo.id }] : undefined,
           // Se elimina cancel_at para evitar el error de parámetro desconocido en Stripe Checkout
         },
         success_url: successUrl,
@@ -183,8 +223,10 @@ export default async function handler(req, res) {
         customer_email: email || undefined,
         client_reference_id: leadId,
         locale: "auto",
+        // NOTA: si se usa "discounts" en subscription_data no se puede usar allow_promotion_codes
+        // en el nivel superior de la sesión a la vez; por eso el código se aplica ya validado aquí.
       });
-      return res.status(200).json({ url: session.url, session_id: session.id });
+      return res.status(200).json({ url: session.url, session_id: session.id, promo_applied: !!promo });
     }
 
     /* ───── B) One-off Payment Mode ───── */
@@ -218,11 +260,12 @@ export default async function handler(req, res) {
       cancel_url: cancelUrl,
       metadata: stringifyMeta(sessMeta),
       payment_intent_data: { metadata: stringifyMeta(sessMeta) },
+      discounts: promo ? [{ promotion_code: promo.id }] : undefined,
       client_reference_id: leadId,
       locale: "auto",
     });
 
-    return res.status(200).json({ url: session.url, session_id: session.id });
+    return res.status(200).json({ url: session.url, session_id: session.id, promo_applied: !!promo });
   } catch (err) {
     console.error(err);
     return res.status(500).json({ error: err?.message || "Internal server error" });
