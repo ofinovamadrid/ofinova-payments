@@ -4,6 +4,13 @@
 // - 프론트에서 온 percent_off 값은 신뢰하지 않고, 여기서 다시 Stripe API로 확인함
 // - 일시불(payment) / 구독(subscription) 두 모드 모두 지원
 // - sessMeta에 promo_code 필드 추가 -> Make 웹훅 -> Airtable까지 자동으로 기록됨
+//
+// 2026-09-15 수정본: 광고 추적(UTM/GCLID) 전달 추가  ★신규★
+// - 프론트에서 온 gclid/utm_* 값을 Make 웹훅 payload에 함께 실어 보냄
+// - Make -> Airtable Leads_v1 의 gclid / utm_term / utm_source / utm_medium
+//   / utm_campaign / utm_content 필드에 매핑하기 위한 것
+// - 결제 로직(Stripe 세션 생성)은 단 한 줄도 건드리지 않음 → 기존 결제 흐름 무영향
+// - 값이 없으면 빈 문자열로 전송 (기존 동작과 동일하게 안전)
 
 import Stripe from "stripe";
 
@@ -33,20 +40,20 @@ const PRICE_MAIL = {
 };
 
 const UPFRONT_PRICE_TABLE = {
-  p3:  { name: "Ofinova Domiciliación – 3 meses",  unit_amount:  7500 }, 
-  p6:  { name: "Ofinova Domiciliación – 6 meses",  unit_amount: 15000 }, 
+  p3: { name: "Ofinova Domiciliación – 3 meses", unit_amount: 7500 },
+  p6: { name: "Ofinova Domiciliación – 6 meses", unit_amount: 15000 },
   p12: { name: "Ofinova Domiciliación – 12 meses", unit_amount: 20400 },
-  p24: { name: "Ofinova Domiciliación – 24 meses", unit_amount: 40800 }, 
+  p24: { name: "Ofinova Domiciliación – 24 meses", unit_amount: 40800 },
 };
 
 const MAIL_NET_EUR_CENTS = 390;
 
 const SITE_URL = process.env.SITE_URL || process.env.APP_BASE_URL || "https://ofinova-madrid.es";
 const successUrl = `${SITE_URL}/confirmacion?session_id={CHECKOUT_SESSION_ID}&status=success&paid=1`;
-const cancelUrl  = `${SITE_URL}/pago?status=cancelled`;
+const cancelUrl = `${SITE_URL}/pago?status=cancelled`;
 
 const RAW_ALLOWED = process.env.CORS_ALLOWED_ORIGINS || [
-    "https://ofinova-madrid.es", "https://www.ofinova-madrid.es", "https://*.framer.app", "https://ofinova.vercel.app", "http://localhost:3000",
+  "https://ofinova-madrid.es", "https://www.ofinova-madrid.es", "https://*.framer.app", "https://ofinova.vercel.app", "http://localhost:3000",
 ].join(",");
 
 const ALLOWED = RAW_ALLOWED.split(",").map((s) => s.trim()).filter(Boolean);
@@ -103,6 +110,38 @@ const firstNonEmpty = (...vals) => {
   }
   return "";
 };
+
+// ★★★ 2026-09-15 신규: 광고 추적값 추출 ★★★
+// 프론트가 어떤 형태로 보내든 잡아내도록 여러 경로를 모두 확인한다.
+//   1) req.body.tracking.gclid      (권장 형태)
+//   2) req.body.gclid               (최상위)
+//   3) req.body.metadata.gclid      (기존 metadata 안)
+// 값이 없으면 빈 문자열 → 기존 동작과 동일하게 안전하게 넘어감.
+function extractTracking(body = {}) {
+  const t = (body && typeof body.tracking === "object" && body.tracking) ? body.tracking : {};
+  const m = (body && typeof body.metadata === "object" && body.metadata) ? body.metadata : {};
+
+  const pick = (...keys) => {
+    for (const k of keys) {
+      const v = firstNonEmpty(t[k], body[k], m[k]);
+      if (v) return v.slice(0, 500); // 과도한 길이 방지
+    }
+    return "";
+  };
+
+  return {
+    gclid:        pick("gclid"),
+    gbraid:       pick("gbraid"),
+    wbraid:       pick("wbraid"),
+    utm_source:   pick("utm_source", "utmSource"),
+    utm_medium:   pick("utm_medium", "utmMedium"),
+    utm_campaign: pick("utm_campaign", "utmCampaign"),
+    utm_content:  pick("utm_content", "utmContent"),
+    utm_term:     pick("utm_term", "utmTerm"),
+    landing_page: pick("landing_page", "landingPage"),
+    referrer:     pick("referrer", "referer"),
+  };
+}
 
 const MAKE_CHECKOUT_WEBHOOK_URL = process.env.MAKE_CHECKOUT_WEBHOOK_URL || "";
 function postToMake(payload) {
@@ -168,6 +207,9 @@ export default async function handler(req, res) {
     const shippingAddress = firstNonEmpty(shippingTop?.address, req.body.address, metadata.address);
     const shippingNotes = firstNonEmpty(shippingTop?.notes, req.body.notes, metadata.notes);
 
+    // ★★★ 2026-09-15 신규: 광고 추적값 추출 ★★★
+    const tracking = extractTracking(req.body);
+
     // ── 할인코드 재검증 (있으면) ──
     const promo = await resolvePromotionCode(promoCode || metadata.promoCode || metadata.promo_code);
 
@@ -194,13 +236,28 @@ export default async function handler(req, res) {
       company_legal_name: companyLegalName || "", company_cif_nif: companyCifNif || "", customer_email: email || "",
       promo_code: promo ? promo.code : "",
       promo_applied: promo ? 1 : 0,
+
+      // ★★★ 2026-09-15 신규: 광고 추적 블록 ★★★
+      // Make에서 "tracking" 하위 항목으로 나타남 → Airtable 필드에 매핑
+      tracking: {
+        gclid:        tracking.gclid,
+        gbraid:       tracking.gbraid,
+        wbraid:       tracking.wbraid,
+        utm_source:   tracking.utm_source,
+        utm_medium:   tracking.utm_medium,
+        utm_campaign: tracking.utm_campaign,
+        utm_content:  tracking.utm_content,
+        utm_term:     tracking.utm_term,
+        landing_page: tracking.landing_page,
+        referrer:     tracking.referrer,
+      },
     });
 
     /* ───── A) Subscription Mode ───── */
     if (mode === "subscription") {
       const domiPriceId = PRICE_DOMI_BY_PLAN[planId];
       if (!domiPriceId) return res.status(400).json({ error: "Missing monthly Price ID" });
-      
+
       const line_items = [{ price: domiPriceId, quantity: 1 }];
       if (mailEnabled) {
         const mailPriceId = (planId === 'p12' || planId === 'p24') ? PRICE_MAIL.annual : PRICE_MAIL.monthly;
