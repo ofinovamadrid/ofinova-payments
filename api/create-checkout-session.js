@@ -11,6 +11,11 @@
 //   / utm_campaign / utm_content 필드에 매핑하기 위한 것
 // - 결제 로직(Stripe 세션 생성)은 단 한 줄도 건드리지 않음 → 기존 결제 흐름 무영향
 // - 값이 없으면 빈 문자열로 전송 (기존 동작과 동일하게 안전)
+//
+// 2026-09-16 수정본: 추적값을 Stripe metadata에도 추가 (B안)  ★신규★
+// - sessMeta에 gclid/utm_* 6개를 "값이 있을 때만" 추가
+//   → Stripe → Make(Checkout Session Completed) → Airtable Leads_v1
+// - Stripe metadata 키 한도(50개)에 닿으면 추가를 생략 → 결제 흐름 절대 안 막힘
 
 import Stripe from "stripe";
 
@@ -222,6 +227,17 @@ export default async function handler(req, res) {
       promo_applied: promo ? "1" : "0",
       promo_percent_off: promo ? String(promo.percent_off) : "0",
     };
+
+    // ★★★ 2026-09-16 신규 (B안): 광고 추적값을 Stripe metadata에도 추가 ★★★
+    // - 값이 있는 항목만 추가 (빈 값은 건너뜀)
+    // - Stripe metadata 키 한도 50개를 넘기게 되면 추가하지 않음 → 결제 에러 방지
+    const STRIPE_META_KEY_LIMIT = 50;
+    for (const k of ["gclid", "utm_source", "utm_medium", "utm_campaign", "utm_content", "utm_term"]) {
+      const v = tracking[k];
+      if (!v) continue;
+      if (!(k in sessMeta) && Object.keys(sessMeta).length >= STRIPE_META_KEY_LIMIT) break;
+      sessMeta[k] = v;
+    }
 
     const upfrontConfig = UPFRONT_PRICE_TABLE[planId];
     const totalUpfrontEur = Math.round(upfrontConfig.unit_amount / 100);
