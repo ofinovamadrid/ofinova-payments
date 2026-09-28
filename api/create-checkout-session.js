@@ -336,6 +336,10 @@ export default async function handler(req, res) {
       discounts: promo ? [{ promotion_code: promo.id }] : undefined,
       client_reference_id: leadId,
       locale: "auto",
+      // 2026-09-28: one-off (연납) 결제도 Customer + Factura(Invoice PDF) 자동 생성
+      customer_creation: "always",
+      invoice_creation: { enabled: true },
+      tax_id_collection: { enabled: true },
     });
 
     return res.status(200).json({ url: session.url, session_id: session.id, promo_applied: !!promo });
