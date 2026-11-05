@@ -16,6 +16,13 @@
 // - sessMeta에 gclid/utm_* 6개를 "값이 있을 때만" 추가
 //   → Stripe → Make(Checkout Session Completed) → Airtable Leads_v1
 // - Stripe metadata 키 한도(50개)에 닿으면 추가를 생략 → 결제 흐름 절대 안 막힘
+//
+// 2026-11-05 수정본: 월납(구독) 결제에도 NIF 입력칸 추가  ★신규★
+// - 원인: 연납(payment)에는 tax_id_collection이 있었지만 월납(subscription)에는 없어서
+//   Checkout 화면에 NIF 칸이 아예 안 떴음 → 첫 factura에 NIF 누락 (예: URNFLWHW-0310)
+// - 변경: 구독·일시불 두 세션 모두 tax_id_collection: { enabled: true, required: "if_supported" }
+//   → 스페인 등 지원 국가 고객은 NIF를 안 쓰면 결제가 안 넘어감 (Stripe가 형식도 검증)
+// - 그 외 결제 로직은 한 줄도 안 건드림. 롤백 = 이 두 줄을 이전 값으로
 
 import Stripe from "stripe";
 
@@ -296,6 +303,8 @@ export default async function handler(req, res) {
         customer_email: email || undefined,
         client_reference_id: leadId,
         locale: "auto",
+        // 2026-11-05: 월납도 NIF 필수 → 첫 factura부터 NIF 자동 기재
+        tax_id_collection: { enabled: true, required: "if_supported" },
         // NOTA: si se usa "discounts" en subscription_data no se puede usar allow_promotion_codes
         // en el nivel superior de la sesión a la vez; por eso el código se aplica ya validado aquí.
       });
@@ -339,7 +348,8 @@ export default async function handler(req, res) {
       // 2026-09-28: one-off (연납) 결제도 Customer + Factura(Invoice PDF) 자동 생성
       customer_creation: "always",
       invoice_creation: { enabled: true },
-      tax_id_collection: { enabled: true },
+      // 2026-11-05: NIF 선택 → 필수
+      tax_id_collection: { enabled: true, required: "if_supported" },
     });
 
     return res.status(200).json({ url: session.url, session_id: session.id, promo_applied: !!promo });
