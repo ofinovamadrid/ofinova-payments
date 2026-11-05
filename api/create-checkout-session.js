@@ -23,6 +23,15 @@
 // - 변경: 구독·일시불 두 세션 모두 tax_id_collection: { enabled: true, required: "if_supported" }
 //   → 스페인 등 지원 국가 고객은 NIF를 안 쓰면 결제가 안 넘어감 (Stripe가 형식도 검증)
 // - 그 외 결제 로직은 한 줄도 안 건드림. 롤백 = 이 두 줄을 이전 값으로
+//
+// 2026-11-05 (2차): Pago 페이지에서 NIF를 직접 받는 구조 추가  ★신규★
+// - Pago가 billing_nif(DNI/NIE/CIF) + billing_name을 보내면:
+//     형식 검사(체크섬) 통과 → Stripe 고객을 먼저 만들고(이름·이메일·NIF) 그 고객으로 결제창을 연다
+//     → Stripe 창에 헷갈리는 "Información del IVA" 칸이 안 뜨고, 첫 factura부터 NIF가 박힘
+// - billing_nif가 없거나 형식이 틀리면(구버전 Pago, 외국 서류 등) → 이전과 100% 같은 방식
+//     (Stripe 창 NIF 필수 + 결제 버튼 옆 안내문 "ES NIF를 고르세요")
+// - 고객 미리 만들기가 실패해도 이전 방식으로 자동 전환 → 결제가 절대 막히지 않음
+// - 롤백 = 이 파일을 커밋 32af7a6 버전으로
 
 import Stripe from "stripe";
 
@@ -194,6 +203,62 @@ async function resolvePromotionCode(rawCode) {
   }
 }
 
+// ── 2026-11-05: 스페인 NIF(DNI·NIE·CIF) 형식 검사 ──
+const DNI_LETTERS = "TRWAGMYFPDXBNJZSQVHLCKE";
+function normNif(v) {
+  return String(v || "").toUpperCase().replace(/[\s.\-]/g, "");
+}
+function isValidSpanishNif(raw) {
+  const v = normNif(raw);
+  // DNI: 8 dígitos + letra
+  if (/^\d{8}[A-Z]$/.test(v)) return DNI_LETTERS[parseInt(v.slice(0, 8), 10) % 23] === v[8];
+  // NIE: X/Y/Z + 7 dígitos + letra
+  if (/^[XYZ]\d{7}[A-Z]$/.test(v)) {
+    const n = "XYZ".indexOf(v[0]) + v.slice(1, 8);
+    return DNI_LETTERS[parseInt(n, 10) % 23] === v[8];
+  }
+  // CIF: letra + 7 dígitos + control (dígito o letra)
+  if (/^[ABCDEFGHJNPQRSUVW]\d{7}[0-9A-J]$/.test(v)) {
+    const digits = v.slice(1, 8);
+    let sum = 0;
+    for (let i = 0; i < 7; i++) {
+      let d = parseInt(digits[i], 10);
+      if (i % 2 === 0) { d *= 2; if (d > 9) d -= 9; }
+      sum += d;
+    }
+    const c = (10 - (sum % 10)) % 10;
+    const ctrl = v[8];
+    return ctrl === String(c) || ctrl === "JABCDEFGHI"[c];
+  }
+  return false;
+}
+
+// Pago에서 받은 NIF로 Stripe 고객을 미리 만든다. 실패하면 null → 이전 방식으로.
+async function precreateCustomer({ email, name, nif, leadId }) {
+  try {
+    const params = {
+      name: name || undefined,
+      email: email || undefined,
+      preferred_locales: ["es-ES"],
+      tax_id_data: [{ type: "es_cif", value: normNif(nif) }],
+      metadata: { lead_id: leadId, source: "framer/pago-nif" },
+    };
+    const c = await stripe.customers.create(params);
+    return c?.id || null;
+  } catch (err) {
+    console.error("[precreateCustomer] failed, fallback to checkout tax_id_collection:", err?.message);
+    return null;
+  }
+}
+
+// Stripe 결제 버튼 옆 안내문 (Pago에서 NIF를 못 받았을 때만)
+const NIF_HINT = {
+  submit: {
+    message:
+      "Para tu factura, en «Información del IVA»: si eres autónomo o tu empresa está en constitución, escribe tu nombre, elige «ES NIF» en el desplegable y pon tu DNI o NIE. Si ya tienes sociedad, pon su nombre y su CIF (también con «ES NIF»).",
+  },
+};
+
 export default async function handler(req, res) {
   applyCors(req, res);
   if (req.method === "OPTIONS") return res.status(200).end();
@@ -225,6 +290,21 @@ export default async function handler(req, res) {
     // ── 할인코드 재검증 (있으면) ──
     const promo = await resolvePromotionCode(promoCode || metadata.promoCode || metadata.promo_code);
 
+    // ── 2026-11-05: Pago에서 온 NIF → Stripe 고객 미리 만들기 ──
+    const billingNif = normNif(firstNonEmpty(req.body?.billing_nif, metadata.billing_nif));
+    const billingName = firstNonEmpty(req.body?.billing_name, metadata.billing_name).slice(0, 200);
+    let preCustomerId = null;
+    if (billingNif && isValidSpanishNif(billingNif)) {
+      preCustomerId = await precreateCustomer({ email, name: billingName, nif: billingNif, leadId });
+    }
+    // 고객을 미리 만들었으면 Stripe 창의 NIF 칸은 끄고, 아니면 이전처럼 필수 + 안내문
+    const checkoutCustomerParams = preCustomerId
+      ? { customer: preCustomerId, customer_update: { address: "auto", name: "never" } }
+      : { customer_email: email || undefined };
+    const taxIdParams = preCustomerId
+      ? {}
+      : { tax_id_collection: { enabled: true, required: "if_supported" }, custom_text: NIF_HINT };
+
     const sessMeta = {
       ...metadata, lead_id: leadId, orderId: leadId, planId, months, mailEnabled: String(mailEnabled ? 1 : 0),
       mailPlan: mailPlan || "", want_gestoria: String(wantGestoria ? 1 : 0), mode,
@@ -233,6 +313,8 @@ export default async function handler(req, res) {
       promo_code: promo ? promo.code : "",
       promo_applied: promo ? "1" : "0",
       promo_percent_off: promo ? String(promo.percent_off) : "0",
+      billing_nif: billingNif || "",
+      billing_nif_precreated: preCustomerId ? "1" : "0",
     };
 
     // ★★★ 2026-09-16 신규 (B안): 광고 추적값을 Stripe metadata에도 추가 ★★★
@@ -300,11 +382,11 @@ export default async function handler(req, res) {
         success_url: successUrl,
         cancel_url: cancelUrl,
         metadata: stringifyMeta(sessMeta),
-        customer_email: email || undefined,
+        ...checkoutCustomerParams,
         client_reference_id: leadId,
         locale: "auto",
-        // 2026-11-05: 월납도 NIF 필수 → 첫 factura부터 NIF 자동 기재
-        tax_id_collection: { enabled: true, required: "if_supported" },
+        // 2026-11-05: NIF — Pago에서 받았으면 고객에 이미 있음 / 아니면 Stripe 창에서 필수 + 안내문
+        ...taxIdParams,
         // NOTA: si se usa "discounts" en subscription_data no se puede usar allow_promotion_codes
         // en el nivel superior de la sesión a la vez; por eso el código se aplica ya validado aquí.
       });
@@ -337,7 +419,7 @@ export default async function handler(req, res) {
       mode: "payment",
       billing_address_collection: "required",
       line_items,
-      customer_email: email || undefined,
+      ...checkoutCustomerParams,
       success_url: successUrl,
       cancel_url: cancelUrl,
       metadata: stringifyMeta(sessMeta),
@@ -346,10 +428,10 @@ export default async function handler(req, res) {
       client_reference_id: leadId,
       locale: "auto",
       // 2026-09-28: one-off (연납) 결제도 Customer + Factura(Invoice PDF) 자동 생성
-      customer_creation: "always",
+      ...(preCustomerId ? {} : { customer_creation: "always" }),
       invoice_creation: { enabled: true },
-      // 2026-11-05: NIF 선택 → 필수
-      tax_id_collection: { enabled: true, required: "if_supported" },
+      // 2026-11-05: NIF — Pago에서 받았으면 고객에 이미 있음 / 아니면 Stripe 창에서 필수 + 안내문
+      ...taxIdParams,
     });
 
     return res.status(200).json({ url: session.url, session_id: session.id, promo_applied: !!promo });
